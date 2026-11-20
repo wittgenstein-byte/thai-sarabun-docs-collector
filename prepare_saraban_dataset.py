@@ -1,0 +1,360 @@
+"""Build 300 DPI stratified 6-type Thai Saraban OCR Benchmark with OCR PII pre-screening."""
+
+import argparse
+import json
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import numpy as np
+import pypdfium2 as pdfium
+from datasets import Dataset, DatasetDict, Features, Image, Sequence, Value
+from PIL import Image as PILImage
+from rapidocr import RapidOCR
+
+from config import (
+    SARABAN_DIR,
+    SARABAN_HF_DIR,
+    SARABAN_MANIFEST_PATH,
+    SARABAN_MAX_PAGES_PER_PDF,
+    SARABAN_PAGE_INDEX_PATH,
+    SARABAN_PAGES_DIR,
+    SARABAN_RENDER_DPI,
+    SARABAN_SCANNED_RATIO,
+    SARABAN_TARGET_PER_TYPE,
+    SARABAN_TYPES,
+)
+from saraban_utils import detect_header_saraban_type, detect_quality_tags, has_thai_citizen_id
+
+ROLE_PRIORITY = {"first_page_header": 0, "signature_page": 1, "body_table": 2}
+
+
+def run_ocr_screen(ocr_engine: RapidOCR, pil_img: PILImage.Image) -> str:
+    """Run lightweight OCR on a downscaled copy of a rendered page to detect PII."""
+    w, h = pil_img.size
+    if w > 1200:
+        img_small = pil_img.resize((1200, max(1, int(h * 1200 / w))), PILImage.Resampling.BILINEAR)
+    else:
+        img_small = pil_img
+    res = ocr_engine(np.asarray(img_small))
+    txts = getattr(res, "txts", None)
+    if txts:
+        return " ".join(str(t) for t in txts)
+    if isinstance(res, tuple) and res and res[0]:
+        return " ".join(str(item[1]) for item in res[0] if len(item) >= 2)
+    return ""
+
+
+def order_candidates_diverse(candidates: list[dict], sort_by_complexity: bool = False) -> list[dict]:
+    """Order candidates across PDFs round-robin while prioritizing first_page_header and signature_page."""
+    by_pdf: dict[str, list[dict]] = defaultdict(list)
+    for c in candidates:
+        by_pdf[c["resource_id"]].append(c)
+
+    for res_id, items in by_pdf.items():
+        if sort_by_complexity:
+            items.sort(
+                key=lambda x: (
+                    ROLE_PRIORITY.get(x["page_role"], 9),
+                    -x["layout_complexity_score"],
+                )
+            )
+        else:
+            items.sort(key=lambda x: (ROLE_PRIORITY.get(x["page_role"], 9), x["page_index"]))
+
+    pdf_ids = list(by_pdf.keys())
+    if sort_by_complexity:
+        pdf_ids.sort(
+            key=lambda rid: max(x["layout_complexity_score"] for x in by_pdf[rid]),
+            reverse=True,
+        )
+
+    ordered: list[dict] = []
+    idx_map = {rid: 0 for rid in pdf_ids}
+    active = list(pdf_ids)
+    while active:
+        next_active = []
+        for rid in active:
+            i = idx_map[rid]
+            if i < len(by_pdf[rid]):
+                ordered.append(by_pdf[rid][i])
+                idx_map[rid] = i + 1
+                if idx_map[rid] < len(by_pdf[rid]):
+                    next_active.append(rid)
+        active = next_active
+    return ordered
+
+
+def build_saraban_dataset(
+    per_type: int = SARABAN_TARGET_PER_TYPE,
+    scanned_ratio: float = SARABAN_SCANNED_RATIO,
+    max_pages_per_pdf: int = SARABAN_MAX_PAGES_PER_PDF,
+    dpi: int = SARABAN_RENDER_DPI,
+) -> None:
+    if not SARABAN_MANIFEST_PATH.exists() or not SARABAN_PAGE_INDEX_PATH.exists():
+        raise FileNotFoundError("Missing Saraban manifest or page_index. Run scan_saraban_pages.py first.")
+
+    manifest_map = {
+        rec["resource_id"]: rec
+        for line in SARABAN_MANIFEST_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        for rec in [json.loads(line)]
+    }
+
+    indexed_pages = [
+        json.loads(line)
+        for line in SARABAN_PAGE_INDEX_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        and not json.loads(line).get("embedded_pii_flagged", False)
+        and json.loads(line).get("page_type") != "other"
+        and json.loads(line).get("label_confidence") != "mismatch_needs_review"
+    ]
+
+    ocr_engine = RapidOCR()
+    SARABAN_PAGES_DIR.mkdir(parents=True, exist_ok=True)
+    scale = dpi / 72.0
+
+    rows: list[dict] = []
+    ocr_pii_rejected = 0
+
+    for st in SARABAN_TYPES:
+        pool = [p for p in indexed_pages if p["saraban_type"] == st]
+        if st == "official_record":
+            pool = [
+                p for p in pool
+                if p.get("label_confidence") == "high"
+                or any(
+                    kw in (p.get("meta_subject", "") + " " + manifest_map.get(p["resource_id"], {}).get("link_label", ""))
+                    for kw in ("รายงานการประชุม", "สรุปข้อราชการ", "หนังสือรับรอง", "มติ", "บันทึกการประชุม")
+                )
+            ]
+        scanned_pool = order_candidates_diverse(
+            [p for p in pool if p["page_type"] == "scanned"]
+        )
+        scanned_ocr_pool = order_candidates_diverse(
+            [p for p in pool if p["page_type"] == "scanned_ocr"]
+        )
+        digital_pool = order_candidates_diverse(
+            [p for p in pool if p["page_type"] == "digital"],
+            sort_by_complexity=True,
+        )
+
+        target_scanned = round(per_type * scanned_ratio)
+        used_per_pdf: dict[str, int] = defaultdict(int)
+        st_rows: list[dict] = []
+        picked_scanned_count = 0
+
+        def try_render_and_add(cand: dict) -> bool:
+            nonlocal ocr_pii_rejected
+            res_id = cand["resource_id"]
+            if used_per_pdf[res_id] >= max_pages_per_pdf:
+                return False
+            rec = manifest_map.get(res_id)
+            if not rec:
+                return False
+            pdf_path = Path(rec["local_path"])
+            if not pdf_path.exists():
+                return False
+
+            doc = None
+            try:
+                doc = pdfium.PdfDocument(str(pdf_path))
+                page = doc[cand["page_index"]]
+                try:
+                    bitmap = page.render(scale=scale)
+                    pil_img = bitmap.to_pil().convert("RGB")
+                finally:
+                    page.close()
+            except Exception as exc:
+                print(f"  [warn] Render failed {pdf_path.name} p{cand['page_num']}: {exc}")
+                return False
+            finally:
+                if doc is not None:
+                    doc.close()
+
+            label_conf = cand["label_confidence"]
+            if cand["page_type"] == "scanned":
+                ocr_text = run_ocr_screen(ocr_engine, pil_img)
+                if has_thai_citizen_id(ocr_text):
+                    ocr_pii_rejected += 1
+                    print(f"  [PII-OCR rejected] {res_id} p{cand['page_num']}")
+                    return False
+                pii_status = "clean_ocr"
+                if cand["page_role"] == "first_page_header" and label_conf == "needs_visual_verify":
+                    det = detect_header_saraban_type(ocr_text)
+                    if det == st:
+                        label_conf = "high"
+            else:
+                pii_status = "clean_text"
+
+            out_dir = SARABAN_PAGES_DIR / st
+            out_dir.mkdir(parents=True, exist_ok=True)
+            img_path = out_dir / f"{res_id}_p{cand['page_num']}.png"
+            pil_img.save(str(img_path), format="PNG")
+            width, height = pil_img.size
+
+            used_per_pdf[res_id] += 1
+            st_rows.append(
+                {
+                    "image": str(img_path),
+                    "doc_id": rec["doc_id"],
+                    "resource_id": res_id,
+                    "saraban_type": st,
+                    "saraban_subtype": cand["saraban_subtype"],
+                    "page_role": cand["page_role"],
+                    "page_type": cand["page_type"],
+                    "label_confidence": label_conf,
+                    "pii_screen_status": pii_status,
+                    "has_pua_mojibake": bool(cand["has_pua_mojibake"]),
+                    "image_coverage_ratio": float(cand["image_coverage_ratio"]),
+                    "layout_complexity_score": float(cand["layout_complexity_score"]),
+                    "path_count": int(cand["path_count"]),
+                    "text_rect_count": int(cand["text_rect_count"]),
+                    "has_embedded_text": cand["embedded_text_chars"] >= 20,
+                    "embedded_text_chars": int(cand["embedded_text_chars"]),
+                    "embedded_text_preview": cand["embedded_text_preview"],
+                    "meta_doc_no": rec["meta_doc_no"],
+                    "meta_doc_date": rec["meta_doc_date"],
+                    "meta_subject": rec["meta_subject"],
+                    "organization": rec["organization"],
+                    "source_portal": rec["source_portal"],
+                    "source_url": rec["source_url"],
+                    "page_num": int(cand["page_num"]),
+                    "total_pages": int(cand["total_pages"]),
+                    "sha256": rec["sha256"],
+                    "width": width,
+                    "height": height,
+                    "ground_truth_text": "",
+                    "gt_status": "unverified",
+                    "quality_tags": detect_quality_tags(pil_img),
+                }
+            )
+            return True
+
+        target_digital = per_type - round(per_type * scanned_ratio)
+        if st in {"internal_memo", "order_regulation", "public_relations", "official_record"}:
+            target_digital += 3
+        target_scanned_cap = per_type - target_digital
+
+        picked_scanned_count = 0
+        st_rows = []
+        used_per_pdf.clear()
+
+        for cand in scanned_pool:
+            if picked_scanned_count >= target_scanned_cap:
+                break
+            if try_render_and_add(cand):
+                picked_scanned_count += 1
+
+        for cand in scanned_ocr_pool:
+            if picked_scanned_count >= target_scanned_cap:
+                break
+            if try_render_and_add(cand):
+                picked_scanned_count += 1
+
+        picked_digital_count = 0
+        for cand in digital_pool:
+            if picked_digital_count >= target_digital:
+                break
+            if try_render_and_add(cand):
+                picked_digital_count += 1
+
+        # Top up to per_type with remaining scanned/scanned_ocr if digital pool was scarce (e.g. stamped_letter)
+        if len(st_rows) < per_type:
+            already_keys = {(r["resource_id"], r["page_num"]) for r in st_rows}
+            for cand in scanned_pool + scanned_ocr_pool:
+                if len(st_rows) >= per_type:
+                    break
+                if (cand["resource_id"], cand["page_num"]) in already_keys:
+                    continue
+                if try_render_and_add(cand):
+                    picked_scanned_count += 1
+                    already_keys.add((cand["resource_id"], cand["page_num"]))
+
+        print(f"[{st}] built {len(st_rows)} pages (scanned+ocr={picked_scanned_count}, digital={picked_digital_count})")
+        rows.extend(st_rows)
+
+    if not rows:
+        raise RuntimeError("No Saraban pages built.")
+
+    features = Features(
+        {
+            "image": Image(),
+            "doc_id": Value("string"),
+            "resource_id": Value("string"),
+            "saraban_type": Value("string"),
+            "saraban_subtype": Value("string"),
+            "page_role": Value("string"),
+            "page_type": Value("string"),
+            "label_confidence": Value("string"),
+            "pii_screen_status": Value("string"),
+            "has_pua_mojibake": Value("bool"),
+            "image_coverage_ratio": Value("float32"),
+            "layout_complexity_score": Value("float32"),
+            "path_count": Value("int32"),
+            "text_rect_count": Value("int32"),
+            "has_embedded_text": Value("bool"),
+            "embedded_text_chars": Value("int32"),
+            "embedded_text_preview": Value("string"),
+            "meta_doc_no": Value("string"),
+            "meta_doc_date": Value("string"),
+            "meta_subject": Value("string"),
+            "organization": Value("string"),
+            "source_portal": Value("string"),
+            "source_url": Value("string"),
+            "page_num": Value("int32"),
+            "total_pages": Value("int32"),
+            "sha256": Value("string"),
+            "width": Value("int32"),
+            "height": Value("int32"),
+            "ground_truth_text": Value("string"),
+            "gt_status": Value("string"),
+            "quality_tags": Sequence(Value("string")),
+        }
+    )
+
+    ds = Dataset.from_list(rows, features=features)
+    ds_dict = DatasetDict({"test": ds})
+    ds_dict.save_to_disk(str(SARABAN_HF_DIR))
+
+    type_counts = dict(Counter(r["page_type"] for r in rows))
+    scanned_total = type_counts.get("scanned", 0) + type_counts.get("scanned_ocr", 0)
+    stats = {
+        "total_pages": len(rows),
+        "total_documents": len({r["resource_id"] for r in rows}),
+        "total_organizations": len({r["organization"] for r in rows}),
+        "by_saraban_type": dict(Counter(r["saraban_type"] for r in rows)),
+        "by_saraban_subtype": dict(Counter(r["saraban_subtype"] for r in rows)),
+        "by_page_type": type_counts,
+        "by_page_role": dict(Counter(r["page_role"] for r in rows)),
+        "by_source_portal": dict(Counter(r["source_portal"] for r in rows)),
+        "scanned_share_pct": round(100.0 * scanned_total / len(rows), 2),
+        "digital_share_pct": round(100.0 * type_counts.get("digital", 0) / len(rows), 2),
+        "ocr_pii_rejected": ocr_pii_rejected,
+        "dpi": dpi,
+    }
+    (SARABAN_DIR / "dataset_stats.json").write_text(
+        json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"\nBuilt Saraban HF Dataset: {stats['total_pages']} pages from {stats['total_documents']} PDFs")
+    print(f"By saraban_type: {stats['by_saraban_type']}")
+    print(f"By page_type: {stats['by_page_type']} (scanned={stats['scanned_share_pct']}%, digital={stats['digital_share_pct']}%)")
+    print(f"OCR PII rejected: {ocr_pii_rejected}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build 300 DPI stratified Saraban 6-type OCR benchmark.")
+    parser.add_argument("--per-type", type=int, default=SARABAN_TARGET_PER_TYPE)
+    parser.add_argument("--scanned-ratio", type=float, default=SARABAN_SCANNED_RATIO)
+    parser.add_argument("--max-pages", type=int, default=SARABAN_MAX_PAGES_PER_PDF)
+    parser.add_argument("--dpi", type=int, default=SARABAN_RENDER_DPI)
+    args = parser.parse_args()
+    build_saraban_dataset(
+        per_type=args.per_type,
+        scanned_ratio=args.scanned_ratio,
+        max_pages_per_pdf=args.max_pages,
+        dpi=args.dpi,
+    )
+
+
+if __name__ == "__main__":
+    main()

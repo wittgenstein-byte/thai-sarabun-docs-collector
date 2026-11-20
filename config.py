@@ -49,6 +49,48 @@ TARGET_TOTAL_PAGES = 600
 SCANNED_RATIO = 0.75
 MAX_SCAN_PAGES_PER_PDF = 30
 
+# Saraban 6-Type Benchmark Configuration
+SARABAN_DIR = DATA_DIR / "saraban"
+SARABAN_RAW_DIR = SARABAN_DIR / "raw_pdfs"
+SARABAN_PAGES_DIR = SARABAN_DIR / "pages"
+SARABAN_HF_DIR = SARABAN_DIR / "hf_dataset"
+SARABAN_MANIFEST_PATH = SARABAN_DIR / "manifest.jsonl"
+SARABAN_PAGE_INDEX_PATH = SARABAN_DIR / "page_index.jsonl"
+
+SARABAN_RENDER_DPI = 300
+SARABAN_TARGET_PER_TYPE = 70
+SARABAN_MAX_PAGES_PER_PDF = 3
+SARABAN_SCANNED_RATIO = 0.75
+
+SARABAN_TYPES = [
+    "external_letter",
+    "internal_memo",
+    "stamped_letter",
+    "order_regulation",
+    "public_relations",
+    "official_record",
+]
+
+PII_TITLE_BLOCKLIST = [
+    "แต่งตั้งโยกย้าย",
+    "เลื่อนเงินเดือน",
+    "สวัสดิการ",
+    "บำเหน็จ",
+    "บำนาญ",
+    "ผู้มีสิทธิรับเงิน",
+    "รายชื่อผู้ผ่าน",
+    "รายชื่อผู้มีสิทธิ",
+    "พ้นจากราชการ",
+    "เกษียณอายุ",
+    "สอบแข่งขัน",
+    "ชี้มูลความผิด",
+    "บรรจุและแต่งตั้ง",
+    "โอนย้าย",
+    "ย้ายข้าราชการ",
+    "รับสมัครบุคคล",
+    "คัดเลือกบุคคล",
+]
+
 
 @dataclass(frozen=True)
 class Credentials:
