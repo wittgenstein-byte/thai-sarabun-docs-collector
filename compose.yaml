@@ -1,0 +1,58 @@
+services:
+  ocr-screener:
+    build:
+      context: .
+      dockerfile: docker/ocr-screener.Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TRAIN_OCR_DATA_DIR=/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  crawler-portal:
+    profiles: ["portal"]
+    build:
+      context: .
+      dockerfile: docker/crawler-portal.Dockerfile
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TRAIN_OCR_DATA_DIR=/app/data
+      - DATAGOTH_API_KEY=${DATAGOTH_API_KEY:-}
+
+  crawler-google:
+    profiles: ["google"]
+    build:
+      context: .
+      dockerfile: docker/crawler-google.Dockerfile
+    shm_size: "2gb"
+    ports:
+      - "7900:7900"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TRAIN_OCR_DATA_DIR=/app/data
+      - ENABLE_NOVNC=1
+      - DISPLAY=:99
+
+  dataset-publisher:
+    profiles: ["publisher"]
+    build:
+      context: .
+      dockerfile: docker/dataset-publisher.Dockerfile
+    depends_on:
+      ocr-screener:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TRAIN_OCR_DATA_DIR=/app/data
+      - OCR_SCREENER_URL=http://ocr-screener:8001
+      - HF_TOKEN=${HF_TOKEN:-}

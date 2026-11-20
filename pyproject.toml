@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "train-ocr"
+version = "0.2.0"
+description = "Decoupled Thai Government OCR Benchmark & Document Collection Pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "pillow>=10.0.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+portal = [
+    "beautifulsoup4>=4.12.0",
+    "pypdfium2>=4.30.0",
+]
+google = [
+    "autocrawler @ git+https://github.com/YoongiKim/AutoCrawler.git",
+]
+ocr = [
+    "rapidocr>=2.0.0",
+    "pypdfium2>=4.30.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "python-multipart>=0.0.12",
+]
+publisher = [
+    "datasets>=3.0.0",
+    "huggingface_hub>=0.25.0",
+    "pyarrow>=15.0.0",
+    "pyyaml>=6.0",
+    "pypdfium2>=4.30.0",
+]
+all = [
+    "train-ocr[portal,google,ocr,publisher,gt]",
+]
+gt = [
+    "google-genai>=1.0.0",
+    "pythainlp>=5.0.0",
+    "rapidfuzz>=3.10.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+train-ocr = "train_ocr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
