@@ -96,6 +96,8 @@ PII_TITLE_BLOCKLIST = [
 
 # Google Images Crawler & Screener Microservice Configuration
 GOOGLE_CRAWL_DIR = DATA_DIR / "google_images"
+GOOGLE_PREPROCESSED_DIR = GOOGLE_CRAWL_DIR / "preprocessed"
+GOOGLE_HF_DIR = GOOGLE_CRAWL_DIR / "hf_dataset"
 GOOGLE_BLOCKED_DOMAINS = (
     "lemon8-app.com",
     "instagram.com",
@@ -130,7 +132,7 @@ GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 IAPP_MARKDOWN_URL = "https://api.iapp.co.th/v3/store/ocr/document/markdown"
 KKU_BASE_URL = "https://gen.ai.kku.ac.th/api/v1"
 KKU_MODEL_A = "gemini-4-hydrogen"
-KKU_MODEL_B = "qwen3.8-27b"
+KKU_MODEL_B = "gemma4-26b"
 
 
 @dataclass(frozen=True)

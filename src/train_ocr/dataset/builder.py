@@ -10,10 +10,15 @@ from typing import Any
 
 import pypdfium2 as pdfium
 
+from PIL import Image as PILImage, ImageOps
+
 from train_ocr.common.manifest import read_jsonl
 from train_ocr.common.saraban_rules import detect_quality_tags
 from train_ocr.common.settings import (
     DATA_DIR,
+    GOOGLE_CRAWL_DIR,
+    GOOGLE_HF_DIR,
+    GOOGLE_PREPROCESSED_DIR,
     GROUPS,
     HF_DATASET_DIR,
     MANIFEST_PATH,
@@ -578,5 +583,184 @@ def main_saraban(argv: list[str] | None = None) -> None:
         scanned_ratio=args.scanned_ratio,
         max_pages_per_pdf=args.max_pages,
         dpi=args.dpi,
+        screener_url=args.screener_url,
+    )
+
+
+def infer_saraban_type_from_keyword(keyword: str) -> str:
+    """Infer coarse Thai Saraban document category from a Google search keyword."""
+    kw = keyword or ""
+    if "บันทึกข้อความ" in kw:
+        return "internal_memo"
+    if any(k in kw for k in ("คำสั่ง", "ระเบียบ", "ข้อบังคับ")):
+        return "order_regulation"
+    if any(k in kw for k in ("ประกาศ", "จัดซื้อจัดจ้าง")):
+        return "public_relations"
+    if "รายงานการประชุม" in kw:
+        return "official_record"
+    if any(k in kw for k in ("หนังสือราชการ", "เอกสารราชการ")):
+        return "external_letter"
+    return "other"
+
+
+def preprocess_document_image(pil_img: PILImage.Image, max_edge: int = 3508) -> PILImage.Image:
+    """Normalize EXIF orientation, convert to RGB, and cap longest edge if max_edge > 0."""
+    img = ImageOps.exif_transpose(pil_img).convert("RGB")
+    if max_edge > 0:
+        w, h = img.size
+        longest = max(w, h)
+        if longest > max_edge:
+            scale = max_edge / longest
+            img = img.resize(
+                (max(1, round(w * scale)), max(1, round(h * scale))),
+                PILImage.Resampling.LANCZOS,
+            )
+    return img
+
+
+def build_google_dataset(
+    filtered_dir: Path = GOOGLE_CRAWL_DIR / "filtered",
+    preprocessed_dir: Path = GOOGLE_PREPROCESSED_DIR,
+    hf_dir: Path = GOOGLE_HF_DIR,
+    max_edge: int = 3508,
+    screener_url: str | None = None,
+) -> dict[str, Any]:
+    """Preprocess kept Google Images (EXIF fix, RGB PNG, PII check, quality tags) and save HF Dataset."""
+    import hashlib
+    import shutil
+    from datasets import Dataset, DatasetDict, Features, Image, Sequence, Value
+
+    kept_dir = filtered_dir / "kept"
+    report_path = filtered_dir / "report.json"
+    if not kept_dir.exists():
+        raise FileNotFoundError(f"Filtered kept directory not found: {kept_dir}")
+
+    report_by_rel: dict[str, dict] = {}
+    if report_path.exists():
+        for rec in json.loads(report_path.read_text(encoding="utf-8")):
+            if rec.get("relative_path"):
+                report_by_rel[rec["relative_path"]] = rec
+
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    kept_files = sorted(
+        p for p in kept_dir.rglob("*") if p.is_file() and p.suffix.lower() in image_exts
+    )
+    if not kept_files:
+        raise RuntimeError(f"No kept images found under {kept_dir}")
+
+    if preprocessed_dir.exists():
+        shutil.rmtree(preprocessed_dir)
+    preprocessed_dir.mkdir(parents=True, exist_ok=True)
+
+    screener = ScreenerClient(base_url=screener_url) if screener_url else None
+    rows: list[dict[str, Any]] = []
+    pii_rejected = 0
+
+    for src_path in kept_files:
+        rel = src_path.relative_to(kept_dir)
+        rel_posix = str(rel.as_posix())
+        keyword = src_path.parent.name if src_path.parent != kept_dir else ""
+        meta = report_by_rel.get(rel_posix, {})
+
+        with PILImage.open(src_path) as raw_img:
+            pil_img = preprocess_document_image(raw_img, max_edge=max_edge)
+
+        has_pii = bool(meta.get("has_pii", False))
+        if not has_pii and screener is not None:
+            has_pii = bool(screener.screen_pii(pil_img).get("has_pii", False))
+
+        if has_pii:
+            pii_rejected += 1
+            print(f"  [PII rejected] {rel_posix}")
+            continue
+
+        out_path = (preprocessed_dir / rel).with_suffix(".png")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pil_img.save(str(out_path), format="PNG", optimize=True)
+        width, height = pil_img.size
+        sha256 = hashlib.sha256(out_path.read_bytes()).hexdigest()
+
+        rows.append(
+            {
+                "image": str(out_path),
+                "doc_id": sha256[:16],
+                "keyword": keyword,
+                "saraban_type_hint": infer_saraban_type_from_keyword(keyword),
+                "relative_path": rel_posix,
+                "source_portal": "google_images",
+                "pii_screen_status": "clean_ocr",
+                "ocr_boxes": int(meta.get("ocr_boxes", 0)),
+                "ocr_chars": int(meta.get("ocr_chars", 0)),
+                "mean_saturation": float(meta.get("mean_saturation", 0.0)),
+                "light_ratio": float(meta.get("light_ratio", 0.0)),
+                "width": width,
+                "height": height,
+                "sha256": sha256,
+                "ground_truth_text": "",
+                "gt_status": "unverified",
+                "quality_tags": detect_quality_tags(pil_img),
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("No clean images left after preprocessing/PII check.")
+
+    features = Features(
+        {
+            "image": Image(),
+            "doc_id": Value("string"),
+            "keyword": Value("string"),
+            "saraban_type_hint": Value("string"),
+            "relative_path": Value("string"),
+            "source_portal": Value("string"),
+            "pii_screen_status": Value("string"),
+            "ocr_boxes": Value("int32"),
+            "ocr_chars": Value("int32"),
+            "mean_saturation": Value("float32"),
+            "light_ratio": Value("float32"),
+            "width": Value("int32"),
+            "height": Value("int32"),
+            "sha256": Value("string"),
+            "ground_truth_text": Value("string"),
+            "gt_status": Value("string"),
+            "quality_tags": Sequence(Value("string")),
+        }
+    )
+
+    ds = Dataset.from_list(rows, features=features)
+    ds_dict = DatasetDict({"test": ds})
+    ds_dict.save_to_disk(str(hf_dir))
+
+    stats = {
+        "total_pages": len(rows),
+        "total_documents": len(rows),
+        "by_keyword": dict(Counter(r["keyword"] for r in rows)),
+        "by_saraban_type_hint": dict(Counter(r["saraban_type_hint"] for r in rows)),
+        "pii_rejected": pii_rejected,
+        "max_edge": max_edge,
+    }
+    stats_path = hf_dir.parent / "dataset_stats.json"
+    stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Built Google Docs HF Dataset: {stats['total_pages']} pages -> {hf_dir}")
+    print(f"By keyword: {stats['by_keyword']}")
+    print(f"By saraban_type_hint: {stats['by_saraban_type_hint']} (PII rejected={pii_rejected})")
+    return stats
+
+
+def main_google(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Preprocess filtered Google Images (EXIF fix, RGB PNG, quality tags) and build HF dataset."
+    )
+    parser.add_argument("--filtered-dir", type=Path, default=GOOGLE_CRAWL_DIR / "filtered")
+    parser.add_argument("--preprocessed-dir", type=Path, default=GOOGLE_PREPROCESSED_DIR)
+    parser.add_argument("--hf-dir", type=Path, default=GOOGLE_HF_DIR)
+    parser.add_argument("--max-edge", type=int, default=3508)
+    parser.add_argument("--screener-url", type=str, default=None)
+    args = parser.parse_args(argv)
+    build_google_dataset(
+        filtered_dir=args.filtered_dir,
+        preprocessed_dir=args.preprocessed_dir,
+        hf_dir=args.hf_dir,
+        max_edge=args.max_edge,
         screener_url=args.screener_url,
     )

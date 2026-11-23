@@ -67,6 +67,11 @@ SUBCOMMANDS: dict[str, tuple[str, str, str]] = {
         "main_saraban",
         "Build 300 DPI stratified 6-type Saraban OCR benchmark HF dataset",
     ),
+    "build-google": (
+        "train_ocr.dataset.builder",
+        "main_google",
+        "Preprocess filtered Google Images and build OCR-ready HF dataset",
+    ),
     "push-hf": (
         "train_ocr.publisher.hf_hub",
         "main",
