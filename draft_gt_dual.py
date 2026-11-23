@@ -5,7 +5,9 @@ import base64
 import io
 import json
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -67,16 +69,19 @@ def _parse_json_response(raw_text: str) -> tuple[str, dict]:
         return text, {"doc_no": "", "doc_date": "", "subject": ""}
 
 
-def _encode_image_for_api(image_path: Path, max_width: int = 1600) -> str:
-    """Resize if needed and encode as JPEG (quality=90) to stay under API payload limits."""
+def _encode_image_for_api(image_path: Path, max_width: int = 1600, max_bytes: int = 650_000) -> str:
+    """Resize if needed and encode as JPEG staying under max_bytes to avoid 413 errors."""
     with Image.open(image_path) as img:
         rgb = img.convert("RGB")
-        w, h = rgb.size
-        if w > max_width:
-            rgb = rgb.resize((max_width, max(1, int(h * max_width / w))), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        rgb.save(buf, format="JPEG", quality=90, optimize=True)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+        for mw, q in ((max_width, 90), (1200, 82), (1000, 75)):
+            w, h = rgb.size
+            scaled = rgb.resize((mw, max(1, int(h * mw / w))), Image.Resampling.LANCZOS) if w > mw else rgb
+            buf = io.BytesIO()
+            scaled.save(buf, format="JPEG", quality=q, optimize=True)
+            data = buf.getvalue()
+            if len(data) <= max_bytes:
+                return base64.b64encode(data).decode("ascii")
+        return base64.b64encode(data).decode("ascii")
 
 
 def call_vlm_openai_compat(
@@ -85,7 +90,7 @@ def call_vlm_openai_compat(
     api_key: str,
     model: str,
     image_path: Path,
-    timeout: int = 180,
+    timeout: int = 90,
 ) -> tuple[str, dict]:
     """Call an OpenAI-compatible /chat/completions endpoint with compressed JPEG image."""
     b64_img = _encode_image_for_api(image_path)
@@ -141,7 +146,8 @@ def run_drafting(
     model_b: str = KKU_MODEL_B,
     only: str = "both",
     limit: int = 0,
-    delay: float = 0.5,
+    delay: float = 0.2,
+    workers: int = 4,
 ) -> None:
     if not GOLDEN_MANIFEST_PATH.exists():
         raise FileNotFoundError(f"Golden manifest not found: {GOLDEN_MANIFEST_PATH}. Run select_golden_set.py first.")
@@ -162,30 +168,41 @@ def run_drafting(
                 rec = json.loads(line)
                 existing[rec["sample_id"]] = rec
 
-    session = requests.Session()
+    lock = threading.Lock()
     processed = 0
+    todo = [
+        item for item in manifest
+        if (only in {"both", "a"} and not existing.get(item["sample_id"], {}).get("model_a_markdown"))
+        or (only in {"both", "b"} and not existing.get(item["sample_id"], {}).get("model_b_markdown"))
+    ]
+    print(f"Pending samples: {len(todo)}/{len(manifest)} (workers={workers}, models={model_a} + {model_b})", flush=True)
 
-    for item in manifest:
+    def process_one(item: dict) -> None:
+        nonlocal processed
         sid = item["sample_id"]
         img_path = Path(item["image_path"])
         if not img_path.exists():
-            print(f"[warn] Missing image for {sid}: {img_path}")
-            continue
+            print(f"[warn] Missing image for {sid}: {img_path}", flush=True)
+            return
 
-        rec = existing.get(
-            sid,
-            {
-                "sample_id": sid,
-                "model_a_name": model_a,
-                "model_a_markdown": "",
-                "model_a_kie": {},
-                "model_b_name": model_b,
-                "model_b_markdown": "",
-                "model_b_kie": {},
-                "agreement_score": 0.0,
-            },
-        )
+        with lock:
+            rec = dict(
+                existing.get(
+                    sid,
+                    {
+                        "sample_id": sid,
+                        "model_a_name": model_a,
+                        "model_a_markdown": "",
+                        "model_a_kie": {},
+                        "model_b_name": model_b,
+                        "model_b_markdown": "",
+                        "model_b_kie": {},
+                        "agreement_score": 0.0,
+                    },
+                )
+            )
 
+        session = requests.Session()
         changed = False
         if only in {"both", "a"} and not rec.get("model_a_markdown"):
             try:
@@ -195,7 +212,7 @@ def run_drafting(
                 rec["model_a_kie"] = kie
                 changed = True
             except Exception as exc:
-                print(f"  [err] {model_a} failed for {sid}: {exc}")
+                print(f"  [err] {model_a} failed for {sid}: {exc}", flush=True)
 
         if only in {"both", "b"} and not rec.get("model_b_markdown"):
             try:
@@ -205,25 +222,33 @@ def run_drafting(
                 rec["model_b_kie"] = kie
                 changed = True
             except Exception as exc:
-                print(f"  [err] {model_b} failed for {sid}: {exc}")
+                print(f"  [err] {model_b} failed for {sid}: {exc}", flush=True)
 
         if changed:
             rec["agreement_score"] = compute_agreement(
                 rec.get("model_a_markdown", ""), rec.get("model_b_markdown", "")
             )
-            existing[sid] = rec
-            GOLDEN_DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with GOLDEN_DRAFTS_PATH.open("w", encoding="utf-8") as f:
-                for r in existing.values():
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            processed += 1
-            print(
-                f"[{processed}] {sid} ({item['saraban_type']}/{item['page_type']}) "
-                f"agreement={rec['agreement_score']:.3f}"
-            )
-            time.sleep(delay)
+            with lock:
+                existing[sid] = rec
+                GOLDEN_DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with GOLDEN_DRAFTS_PATH.open("w", encoding="utf-8") as f:
+                    for r in existing.values():
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                processed += 1
+                print(
+                    f"[{processed}/{len(todo)}] {sid} ({item['saraban_type']}/{item['page_type']}) "
+                    f"agreement={rec['agreement_score']:.3f}",
+                    flush=True,
+                )
+            if delay > 0:
+                time.sleep(delay)
 
-    print(f"\nDual drafting complete: {len(existing)}/{len(manifest)} samples stored in {GOLDEN_DRAFTS_PATH}")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(process_one, item) for item in todo]
+        for fut in as_completed(futures):
+            fut.result()
+
+    print(f"\nDual drafting complete: {len(existing)}/{len(manifest)} samples stored in {GOLDEN_DRAFTS_PATH}", flush=True)
 
 
 def main() -> None:
@@ -233,7 +258,8 @@ def main() -> None:
     parser.add_argument("--model-b", type=str, default=KKU_MODEL_B)
     parser.add_argument("--only", choices=["both", "a", "b"], default="both")
     parser.add_argument("--limit", type=int, default=0, help="Process at most N samples (0 = all).")
-    parser.add_argument("--delay", type=float, default=0.5)
+    parser.add_argument("--delay", type=float, default=0.2)
+    parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     run_drafting(
         base_url=args.base_url,
@@ -242,6 +268,7 @@ def main() -> None:
         only=args.only,
         limit=args.limit,
         delay=args.delay,
+        workers=args.workers,
     )
 
 
