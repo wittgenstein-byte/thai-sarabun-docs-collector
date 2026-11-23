@@ -173,7 +173,9 @@ def evaluate_model(
 
     for gt in gt_records:
         sid = gt["sample_id"]
-        ref_md = gt["ground_truth_text"]
+        ref_md = (gt.get("ground_truth_text") or "").strip()
+        if not ref_md:
+            continue
         pred = preds_map.get(sid, {})
         hyp_md = pred.get("pred_markdown", "")
 

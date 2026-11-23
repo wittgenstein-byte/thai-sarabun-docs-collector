@@ -255,7 +255,11 @@ def load_credentials(env_path: Path | str = ".env") -> Credentials:
 def load_gt_api_keys(env_path: Path | str = ".env") -> tuple[str, str]:
     """Load (gemini_api_key, iapp_api_key) from environment variables or .env."""
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
-    iapp_key = os.environ.get("IAPP_API_KEY", "").strip() or os.environ.get("OPENTHAI_API_KEY", "").strip()
+    iapp_key = (
+        os.environ.get("IAPP_API_KEY", "").strip()
+        or os.environ.get("OPENTHAI_API_KEY", "").strip()
+        or os.environ.get("GT_THAI_DOCS", "").strip()
+    )
 
     path = Path(env_path)
     if path.exists():
@@ -268,7 +272,7 @@ def load_gt_api_keys(env_path: Path | str = ".env") -> tuple[str, str]:
             v_clean = v.strip().strip('"').strip("'")
             if k_clean in {"GEMINI_API_KEY", "GOOGLE_API_KEY"} and not gemini_key:
                 gemini_key = v_clean
-            elif k_clean in {"IAPP_API_KEY", "OPENTHAI_API_KEY"} and not iapp_key:
+            elif k_clean in {"IAPP_API_KEY", "OPENTHAI_API_KEY", "GT_THAI_DOCS"} and not iapp_key:
                 iapp_key = v_clean
 
     return gemini_key, iapp_key

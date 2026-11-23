@@ -113,7 +113,7 @@ def build_combined_readme(
         "# Thai Government PDF OCR Test Benchmark (`narawit16/thai-govern-test-ocr`)\n",
         "An evaluation benchmark and training corpus of **Thai government documents** designed for OCR, layout analysis, and VLM document-parsing:\n",
         "- **`default`**: Broad cross-agency Thai open government PDFs from `data.go.th` (15 domain groups, 111 agencies, 200 DPI).\n",
-        "- **`saraban_6types`**: Curated **6 official Thai Saraban correspondence types** (*ระเบียบสำนักนายกรัฐมนตรีว่าด้วยงานสารบรรณ*) from `dla.go.th` & `data.go.th` (300 DPI, PDPA-screened, annotation-ready).\n",
+        "- **`saraban_6types`**: Curated **6 official Thai Saraban correspondence types** (*ระเบียบสำนักนายกรัฐมนตรีว่าด้วยงานสารบรรณ*) from `dla.go.th` & `data.go.th` (300 DPI, PDPA-screened, with human-verified Golden Set Ground Truth).\n",
         "- **`google_docs`**: Web-crawled Thai government & local administration document images.\n",
         "- **`dla_bulk`**: High-coverage multi-portal collection from `www.dla.go.th` & `sll.dla.go.th` (official letters, local laws, articles, legal opinions, 200 DPI, PDPA-screened).\n",
     ]
@@ -137,6 +137,33 @@ def build_combined_readme(
                 saraban_stats["by_page_role"].items(), key=lambda x: x[1], reverse=True
             )
         )
+        gt_summary_block = ""
+        gt_ann_path = Path("data/saraban/golden_120/gt_annotations.jsonl")
+        eval_md_path = Path("data/saraban/golden_120/eval_report.md")
+        if gt_ann_path.exists():
+            anns = [json.loads(l) for l in gt_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            hv = sum(1 for a in anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+            fl = sum(1 for a in anns if a.get("gt_status") == "flagged")
+            gt_summary_block = f"""
+### Golden Set Ground Truth (`is_golden_set == True`)
+- **Verified GT Pages (`gt_status == "human_verified"`):** {hv:,} pages (`flagged`: {fl:,})
+- **GT Format:** Full-page Markdown (GFM tables + HTML `<table>` for merged cells) in `ground_truth_text`, plus KIE Header JSON (`doc_no`, `doc_date`, `subject`) in `gt_kie_json`.
+- **Transcription Rules:**
+  - Exact printed numerals preserved verbatim (`๑–๙` vs `0–9`).
+  - Printed body/headers + clearly readable rubber stamps (`ด่วนที่สุด`, agency receipt stamps) transcribed; illegible wet signatures tagged `[SIGNATURE]`; handwritten margin notes excluded.
+"""
+        if eval_md_path.exists():
+            eval_lines = [
+                ln for ln in eval_md_path.read_text(encoding="utf-8").splitlines()
+                if not ln.startswith("# ")
+            ]
+            gt_summary_block += (
+                "\n### Baseline Draft Evaluation (on `human_verified` Golden Set)\n"
+                "*(Note: `gemini-4-hydrogen` served as the primary UI pre-fill draft, so its baseline CER reflects draft-assisted edits.)*\n\n"
+                + "\n".join(eval_lines[:9])
+                + "\n"
+            )
+
         sections.append(
             f"""## Config 1: `saraban_6types` (6 Official Saraban Document Types)
 
@@ -144,6 +171,7 @@ def build_combined_readme(
 - **Resolution:** {saraban_stats['dpi']} DPI (RGB PNG)
 - **Stratification:** {saraban_stats['scanned_share_pct']}% Scanned (`scanned` + `scanned_ocr`) / {saraban_stats['digital_share_pct']}% Complex Digital
 - **PDPA Screening:** Pre-filtered HR/welfare titles + 13-digit Arabic & Thai numeral ID checksum check on both embedded text and RapidOCR scanned text (`ocr_pii_rejected={saraban_stats.get('ocr_pii_rejected', 0)}`).
+{gt_summary_block}
 
 ### Breakdown by `saraban_type`
 | `saraban_type` | Pages |

@@ -1,5 +1,6 @@
 """Local FastAPI Web UI for Human-in-the-Loop Ground Truth Verification (localhost:8765)."""
 
+import argparse
 import json
 from pathlib import Path
 
@@ -8,6 +9,20 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from config import GOLDEN_DRAFTS_PATH, GOLDEN_MANIFEST_PATH, GT_ANNOTATIONS_PATH
+from train_ocr.common.settings import GOOGLE_CRAWL_DIR
+
+GOOGLE_GT_DIR = GOOGLE_CRAWL_DIR / "gt"
+_ACTIVE_DATASET = "saraban"
+
+
+def _get_paths() -> tuple[Path, Path, Path]:
+    if _ACTIVE_DATASET == "google_docs":
+        return (
+            GOOGLE_GT_DIR / "google_manifest.jsonl",
+            GOOGLE_GT_DIR / "dual_drafts.jsonl",
+            GOOGLE_GT_DIR / "gt_annotations.jsonl",
+        )
+    return GOLDEN_MANIFEST_PATH, GOLDEN_DRAFTS_PATH, GT_ANNOTATIONS_PATH
 
 app = FastAPI(title="Thai Saraban OCR GT Review UI")
 
@@ -50,17 +65,18 @@ def _write_jsonl_map(path: Path, data: dict[str, dict]) -> None:
 
 @app.get("/api/items")
 def get_items() -> dict:
-    """Return merged Golden Set manifest + dual-model drafts + saved GT annotations."""
-    if not GOLDEN_MANIFEST_PATH.exists():
-        raise HTTPException(status_code=404, detail="golden_manifest.jsonl not found")
+    """Return merged manifest + model drafts + saved GT annotations."""
+    manifest_path, drafts_path, annotations_path = _get_paths()
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail=f"{manifest_path.name} not found")
 
     manifest = [
         json.loads(line)
-        for line in GOLDEN_MANIFEST_PATH.read_text(encoding="utf-8").splitlines()
+        for line in manifest_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    drafts = _load_jsonl_map(GOLDEN_DRAFTS_PATH)
-    annotations = _load_jsonl_map(GT_ANNOTATIONS_PATH)
+    drafts = _load_jsonl_map(drafts_path)
+    annotations = _load_jsonl_map(annotations_path)
 
     items: list[dict] = []
     for m in manifest:
@@ -101,8 +117,9 @@ def get_items() -> dict:
 
 @app.get("/api/image/{sample_id}")
 def get_image(sample_id: str) -> FileResponse:
-    """Serve the 300 DPI PNG image for a given sample_id."""
-    manifest = _load_jsonl_map(GOLDEN_MANIFEST_PATH)
+    """Serve the document image for a given sample_id."""
+    manifest_path, _, _ = _get_paths()
+    manifest = _load_jsonl_map(manifest_path)
     item = manifest.get(sample_id)
     if not item:
         raise HTTPException(status_code=404, detail="Sample not found")
@@ -115,7 +132,8 @@ def get_image(sample_id: str) -> FileResponse:
 @app.post("/api/save")
 def save_annotation(req: SaveAnnotationRequest) -> dict:
     """Persist a reviewed Ground Truth annotation to gt_annotations.jsonl."""
-    annotations = _load_jsonl_map(GT_ANNOTATIONS_PATH)
+    _, _, annotations_path = _get_paths()
+    annotations = _load_jsonl_map(annotations_path)
     annotations[req.sample_id] = {
         "sample_id": req.sample_id,
         "ground_truth_text": req.ground_truth_text,
@@ -127,7 +145,7 @@ def save_annotation(req: SaveAnnotationRequest) -> dict:
         },
         "quality_tags": req.quality_tags,
     }
-    _write_jsonl_map(GT_ANNOTATIONS_PATH, annotations)
+    _write_jsonl_map(annotations_path, annotations)
     verified = sum(1 for v in annotations.values() if v.get("gt_status") == "human_verified")
     return {"ok": True, "sample_id": req.sample_id, "verified": verified}
 
@@ -384,4 +402,10 @@ def index() -> str:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8765)
+    parser = argparse.ArgumentParser(description="Launch Human-in-the-Loop GT Review UI.")
+    parser.add_argument("--dataset", choices=["saraban", "google_docs"], default="saraban")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    _ACTIVE_DATASET = args.dataset
+    uvicorn.run(app, host=args.host, port=args.port)
