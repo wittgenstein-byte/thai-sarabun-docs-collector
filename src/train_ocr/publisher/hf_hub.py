@@ -11,6 +11,8 @@ import yaml
 
 from train_ocr.common.settings import (
     DATA_DIR,
+    DLA_BULK_DIR,
+    DLA_BULK_HF_DIR,
     GOOGLE_CRAWL_DIR,
     GOOGLE_HF_DIR,
     HF_DATASET_DIR,
@@ -80,6 +82,15 @@ def merge_hub_yaml(hub_yaml: str, repo_files: list[str]) -> str:
             "config_name": "google_docs",
             "data_files": [{"split": "test", "path": google_path}],
         }
+    dla_bulk_split = "train" if any(f.startswith("dla_bulk/train-") or f.startswith("data/dla_bulk/train-") for f in repo_files) else "test"
+    dla_bulk_path = f"data/dla_bulk/{dla_bulk_split}-*" if any(f.startswith("data/dla_bulk/") for f in repo_files) else f"dla_bulk/{dla_bulk_split}-*"
+    if "dla_bulk" not in existing_configs and any(
+        f.startswith(dla_bulk_path.split("*")[0]) for f in repo_files
+    ):
+        existing_configs["dla_bulk"] = {
+            "config_name": "dla_bulk",
+            "data_files": [{"split": dla_bulk_split, "path": dla_bulk_path}],
+        }
     if existing_configs:
         meta["configs"] = list(existing_configs.values())
 
@@ -92,16 +103,19 @@ def build_combined_readme(
     hub_yaml: str = "",
     repo_files: list[str] | None = None,
     google_stats: dict | None = None,
+    dla_bulk_stats: dict | None = None,
 ) -> str:
-    """Build a Dataset Card covering both default and saraban_6types configs."""
+    """Build a Dataset Card covering all benchmark & training configs."""
     yaml_str = merge_hub_yaml(hub_yaml, repo_files or [])
 
     sections: list[str] = [
         f"---\n{yaml_str}\n---\n",
         "# Thai Government PDF OCR Test Benchmark (`narawit16/thai-govern-test-ocr`)\n",
-        "An evaluation benchmark of **Thai government documents** designed for OCR, layout analysis, and VLM document-parsing testing, with two complementary configs:\n",
+        "An evaluation benchmark and training corpus of **Thai government documents** designed for OCR, layout analysis, and VLM document-parsing:\n",
         "- **`default`**: Broad cross-agency Thai open government PDFs from `data.go.th` (15 domain groups, 111 agencies, 200 DPI).\n",
         "- **`saraban_6types`**: Curated **6 official Thai Saraban correspondence types** (*ระเบียบสำนักนายกรัฐมนตรีว่าด้วยงานสารบรรณ*) from `dla.go.th` & `data.go.th` (300 DPI, PDPA-screened, annotation-ready).\n",
+        "- **`google_docs`**: Web-crawled Thai government & local administration document images.\n",
+        "- **`dla_bulk`**: High-coverage multi-portal collection from `www.dla.go.th` & `sll.dla.go.th` (official letters, local laws, articles, legal opinions, 200 DPI, PDPA-screened).\n",
     ]
 
     if saraban_stats:
@@ -199,6 +213,39 @@ def build_combined_readme(
 """
         )
 
+    if dla_bulk_stats:
+        src_rows = "\n".join(
+            f"| `{src}` | {cnt:,} |"
+            for src, cnt in sorted(
+                dla_bulk_stats["by_source"].items(), key=lambda x: x[1], reverse=True
+            )
+        )
+        pt_rows = "\n".join(
+            f"| `{pt}` | {cnt:,} ({100.0 * cnt / max(dla_bulk_stats['total_pages'], 1):.1f}%) |"
+            for pt, cnt in sorted(
+                dla_bulk_stats["by_page_type"].items(), key=lambda x: x[1], reverse=True
+            )
+        )
+        sections.append(
+            f"""## Config 4: `dla_bulk` (DLA Multi-Portal Corpus from `dla.go.th` & `sll.dla.go.th`)
+
+- **Total Pages (`{dla_bulk_stats.get('split', 'train')}` split):** {dla_bulk_stats['total_pages']:,} pages from {dla_bulk_stats['total_documents']:,} PDFs
+- **Resolution:** {dla_bulk_stats['dpi']} DPI (RGB PNG)
+- **Stratification:** {dla_bulk_stats['scanned_share_pct']}% Scanned (`scanned` + `scanned_ocr`) / {dla_bulk_stats['digital_share_pct']}% Digital
+- **PDPA Screening:** Excluded {dla_bulk_stats.get('pii_excluded_pages', 0):,} PII-flagged pages and {dla_bulk_stats.get('other_excluded_pages', 0):,} blank/other pages.
+
+### Breakdown by Portal (`source`)
+| `source` | Pages |
+|---|---:|
+{src_rows}
+
+### Breakdown by `page_type`
+| `page_type` | Pages |
+|---|---:|
+{pt_rows}
+"""
+        )
+
     sections.append(
         """## Usage
 
@@ -222,38 +269,42 @@ general = load_dataset("narawit16/thai-govern-test-ocr", "default", split="test"
     return "\n".join(sections)
 
 
-def push_dataset(config_name: str = "default") -> None:
+def push_dataset(config_name: str = "default", readme_only: bool = False) -> None:
     """Push a prepared dataset config to Hugging Face Hub using HF_TOKEN only."""
     from datasets import DatasetDict
     from huggingface_hub import HfApi, hf_hub_download
 
     hf_token = load_hf_token()
-    if config_name == "saraban_6types":
-        ds_dir = SARABAN_HF_DIR
-        stats_path = SARABAN_DIR / "dataset_stats.json"
-    elif config_name == "google_docs":
-        ds_dir = GOOGLE_HF_DIR
-        stats_path = GOOGLE_CRAWL_DIR / "dataset_stats.json"
-    else:
-        ds_dir = HF_DATASET_DIR
-        stats_path = DATA_DIR / "dataset_stats.json"
+    if not readme_only:
+        if config_name == "saraban_6types":
+            ds_dir = SARABAN_HF_DIR
+            stats_path = SARABAN_DIR / "dataset_stats.json"
+        elif config_name == "google_docs":
+            ds_dir = GOOGLE_HF_DIR
+            stats_path = GOOGLE_CRAWL_DIR / "dataset_stats.json"
+        elif config_name == "dla_bulk":
+            ds_dir = DLA_BULK_HF_DIR
+            stats_path = DLA_BULK_DIR / "dataset_stats.json"
+        else:
+            ds_dir = HF_DATASET_DIR
+            stats_path = DATA_DIR / "dataset_stats.json"
 
-    if not ds_dir.exists():
-        raise FileNotFoundError(f"Dataset directory not found: {ds_dir}")
+        if not ds_dir.exists():
+            raise FileNotFoundError(f"Dataset directory not found: {ds_dir}")
 
-    stats = json.loads(stats_path.read_text(encoding="utf-8"))
-    ds_dict = DatasetDict.load_from_disk(str(ds_dir))
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        ds_dict = DatasetDict.load_from_disk(str(ds_dir))
 
-    print(f"Pushing config='{config_name}' ({stats['total_pages']} pages) to {HF_REPO_ID}...")
-    ds_dict.push_to_hub(
-        HF_REPO_ID,
-        config_name=config_name,
-        token=hf_token,
-        commit_message=(
-            f"Upload config={config_name} "
-            f"({stats['total_pages']} pages from {stats['total_documents']} PDFs)"
-        ),
-    )
+        print(f"Pushing config='{config_name}' ({stats['total_pages']} pages) to {HF_REPO_ID}...")
+        ds_dict.push_to_hub(
+            HF_REPO_ID,
+            config_name=config_name,
+            token=hf_token,
+            commit_message=(
+                f"Upload config={config_name} "
+                f"({stats['total_pages']} pages from {stats['total_documents']} PDFs)"
+            ),
+        )
 
     hub_yaml = ""
     try:
@@ -267,6 +318,7 @@ def push_dataset(config_name: str = "default") -> None:
     default_stats_path = DATA_DIR / "dataset_stats.json"
     saraban_stats_path = SARABAN_DIR / "dataset_stats.json"
     google_stats_path = GOOGLE_CRAWL_DIR / "dataset_stats.json"
+    dla_bulk_stats_path = DLA_BULK_DIR / "dataset_stats.json"
     default_stats = (
         json.loads(default_stats_path.read_text(encoding="utf-8"))
         if default_stats_path.exists()
@@ -282,6 +334,11 @@ def push_dataset(config_name: str = "default") -> None:
         if google_stats_path.exists()
         else None
     )
+    dla_bulk_stats = (
+        json.loads(dla_bulk_stats_path.read_text(encoding="utf-8"))
+        if dla_bulk_stats_path.exists()
+        else None
+    )
 
     api = HfApi(token=hf_token)
     repo_files = api.list_repo_files(HF_REPO_ID, repo_type="dataset")
@@ -294,6 +351,7 @@ def push_dataset(config_name: str = "default") -> None:
             hub_yaml=hub_yaml,
             repo_files=repo_files,
             google_stats=google_stats,
+            dla_bulk_stats=dla_bulk_stats,
         ),
         encoding="utf-8",
     )
@@ -305,15 +363,20 @@ def push_dataset(config_name: str = "default") -> None:
         repo_type="dataset",
         commit_message=f"Update Dataset Card README.md for config={config_name}",
     )
-    print(f"Successfully published config='{config_name}' to https://huggingface.co/datasets/{HF_REPO_ID}")
+    print(f"Successfully updated README.md on https://huggingface.co/datasets/{HF_REPO_ID}")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Push dataset config to Hugging Face Hub.")
     parser.add_argument(
         "--config-name",
-        choices=["default", "saraban_6types", "google_docs"],
+        choices=["default", "saraban_6types", "google_docs", "dla_bulk"],
         default="default",
     )
+    parser.add_argument(
+        "--readme-only",
+        action="store_true",
+        help="Only regenerate and upload README.md without re-pushing dataset shards",
+    )
     args = parser.parse_args(argv)
-    push_dataset(config_name=args.config_name)
+    push_dataset(config_name=args.config_name, readme_only=args.readme_only)
