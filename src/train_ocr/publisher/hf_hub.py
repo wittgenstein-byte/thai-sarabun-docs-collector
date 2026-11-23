@@ -11,6 +11,8 @@ import yaml
 
 from train_ocr.common.settings import (
     DATA_DIR,
+    GOOGLE_CRAWL_DIR,
+    GOOGLE_HF_DIR,
     HF_DATASET_DIR,
     HF_REPO_ID,
     SARABAN_DIR,
@@ -44,10 +46,13 @@ def merge_hub_yaml(hub_yaml: str, repo_files: list[str]) -> str:
 
     default_path = "data/test-*"
     saraban_path = "saraban_6types/test-*"
+    google_path = "google_docs/test-*"
     if any(f.startswith("default/test-") for f in repo_files):
         default_path = "default/test-*"
     if any(f.startswith("data/saraban_6types/") for f in repo_files):
         saraban_path = "data/saraban_6types/test-*"
+    if any(f.startswith("data/google_docs/") for f in repo_files):
+        google_path = "data/google_docs/test-*"
 
     existing_configs = {
         c["config_name"]: c
@@ -68,6 +73,13 @@ def merge_hub_yaml(hub_yaml: str, repo_files: list[str]) -> str:
             "config_name": "saraban_6types",
             "data_files": [{"split": "test", "path": saraban_path}],
         }
+    if "google_docs" not in existing_configs and any(
+        f.startswith(google_path.split("*")[0]) for f in repo_files
+    ):
+        existing_configs["google_docs"] = {
+            "config_name": "google_docs",
+            "data_files": [{"split": "test", "path": google_path}],
+        }
     if existing_configs:
         meta["configs"] = list(existing_configs.values())
 
@@ -79,6 +91,7 @@ def build_combined_readme(
     saraban_stats: dict | None,
     hub_yaml: str = "",
     repo_files: list[str] | None = None,
+    google_stats: dict | None = None,
 ) -> str:
     """Build a Dataset Card covering both default and saraban_6types configs."""
     yaml_str = merge_hub_yaml(hub_yaml, repo_files or [])
@@ -166,6 +179,26 @@ def build_combined_readme(
 """
         )
 
+    if google_stats:
+        kw_rows = "\n".join(
+            f"| `{kw}` | {cnt:,} |"
+            for kw, cnt in sorted(
+                google_stats["by_keyword"].items(), key=lambda x: x[1], reverse=True
+            )
+        )
+        sections.append(
+            f"""## Config 3: `google_docs` (Web-Crawled Thai Government & Local Admin Documents)
+
+- **Total Images (`test` split):** {google_stats['total_pages']:,} images (EXIF-normalized RGB PNG, deduplicated, PDPA-screened)
+- **Max Edge:** {google_stats.get('max_edge', 3508)} px
+
+### Breakdown by Search Keyword
+| `keyword` | Images |
+|---|---:|
+{kw_rows}
+"""
+        )
+
     sections.append(
         """## Usage
 
@@ -198,6 +231,9 @@ def push_dataset(config_name: str = "default") -> None:
     if config_name == "saraban_6types":
         ds_dir = SARABAN_HF_DIR
         stats_path = SARABAN_DIR / "dataset_stats.json"
+    elif config_name == "google_docs":
+        ds_dir = GOOGLE_HF_DIR
+        stats_path = GOOGLE_CRAWL_DIR / "dataset_stats.json"
     else:
         ds_dir = HF_DATASET_DIR
         stats_path = DATA_DIR / "dataset_stats.json"
@@ -230,6 +266,7 @@ def push_dataset(config_name: str = "default") -> None:
 
     default_stats_path = DATA_DIR / "dataset_stats.json"
     saraban_stats_path = SARABAN_DIR / "dataset_stats.json"
+    google_stats_path = GOOGLE_CRAWL_DIR / "dataset_stats.json"
     default_stats = (
         json.loads(default_stats_path.read_text(encoding="utf-8"))
         if default_stats_path.exists()
@@ -240,13 +277,24 @@ def push_dataset(config_name: str = "default") -> None:
         if saraban_stats_path.exists()
         else None
     )
+    google_stats = (
+        json.loads(google_stats_path.read_text(encoding="utf-8"))
+        if google_stats_path.exists()
+        else None
+    )
 
     api = HfApi(token=hf_token)
     repo_files = api.list_repo_files(HF_REPO_ID, repo_type="dataset")
 
     readme_path = DATA_DIR / "README.md"
     readme_path.write_text(
-        build_combined_readme(default_stats, saraban_stats, hub_yaml=hub_yaml, repo_files=repo_files),
+        build_combined_readme(
+            default_stats,
+            saraban_stats,
+            hub_yaml=hub_yaml,
+            repo_files=repo_files,
+            google_stats=google_stats,
+        ),
         encoding="utf-8",
     )
 
@@ -262,6 +310,10 @@ def push_dataset(config_name: str = "default") -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Push dataset config to Hugging Face Hub.")
-    parser.add_argument("--config-name", choices=["default", "saraban_6types"], default="default")
+    parser.add_argument(
+        "--config-name",
+        choices=["default", "saraban_6types", "google_docs"],
+        default="default",
+    )
     args = parser.parse_args(argv)
     push_dataset(config_name=args.config_name)
