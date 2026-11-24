@@ -137,6 +137,16 @@ INTERN_SODA_KRUT_RAW_DIR = INTERN_SODA_DIR / "has_krut"
 INTERN_SODA_KRUT_PREPROCESSED_DIR = INTERN_SODA_DIR / "preprocessed_krut"
 INTERN_SODA_KRUT_HF_DIR = INTERN_SODA_DIR / "hf_dataset_krut"
 
+# Rajakitcha (Royal Gazette / Constituencies) Dataset Configuration
+RAJAKITCHA_DIR = DATA_DIR / "rajakitcha"
+RAJAKITCHA_RAW_DIR = RAJAKITCHA_DIR / "raw"
+RAJAKITCHA_PREPROCESSED_DIR = RAJAKITCHA_DIR / "preprocessed"
+RAJAKITCHA_HF_DIR = RAJAKITCHA_DIR / "hf_dataset"
+RAJAKITCHA_MANIFEST_PATH = RAJAKITCHA_DIR / "manifest.jsonl"
+RAJAKITCHA_SOURCE_REPO = "KittapatR/Thai-OCR-open-source-initiative"
+RAJAKITCHA_SOURCE_PATH = "Example/Constituencies"
+RAJAKITCHA_SOURCE_REF = "main"
+
 GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 IAPP_MARKDOWN_URL = "https://api.iapp.co.th/v3/store/ocr/document/markdown"
 KKU_BASE_URL = "https://gen.ai.kku.ac.th/api/v1"

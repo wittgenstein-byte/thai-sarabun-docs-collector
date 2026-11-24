@@ -29,6 +29,11 @@ from train_ocr.common.settings import (
     MAX_PAGES_PER_PDF,
     PAGE_INDEX_PATH,
     PAGES_DIR,
+    RAJAKITCHA_DIR,
+    RAJAKITCHA_HF_DIR,
+    RAJAKITCHA_PREPROCESSED_DIR,
+    RAJAKITCHA_RAW_DIR,
+    RAJAKITCHA_SOURCE_REPO,
     RENDER_DPI,
     SARABAN_DIR,
     SARABAN_HF_DIR,
@@ -952,6 +957,130 @@ def main_intern_soda_krut(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-edge", type=int, default=3508)
     args = parser.parse_args(argv)
     build_intern_soda_krut_dataset(
+        raw_dir=args.raw_dir,
+        preprocessed_dir=args.preprocessed_dir,
+        hf_dir=args.hf_dir,
+        max_edge=args.max_edge,
+    )
+
+
+def build_rajakitcha_dataset(
+    raw_dir: Path = RAJAKITCHA_RAW_DIR,
+    preprocessed_dir: Path = RAJAKITCHA_PREPROCESSED_DIR,
+    hf_dir: Path = RAJAKITCHA_HF_DIR,
+    max_edge: int = 3508,
+) -> dict[str, Any]:
+    """Preprocess Rajakitcha (Royal Gazette) document images and save HF Dataset."""
+    import hashlib
+    import shutil
+    from datasets import Dataset, DatasetDict, Features, Image, Sequence, Value
+
+    if not raw_dir.exists():
+        raise FileNotFoundError(f"Rajakitcha raw directory not found: {raw_dir}")
+
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
+    raw_files = sorted(
+        p for p in raw_dir.rglob("*") if p.is_file() and p.suffix.lower() in image_exts
+    )
+    if not raw_files:
+        raise RuntimeError(f"No images found under {raw_dir}")
+
+    if preprocessed_dir.exists():
+        shutil.rmtree(preprocessed_dir)
+    preprocessed_dir.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    duplicates_skipped = 0
+
+    for src_path in raw_files:
+        rel = src_path.relative_to(raw_dir)
+        with PILImage.open(src_path) as raw_img:
+            pil_img = preprocess_document_image(raw_img, max_edge=max_edge)
+
+        out_path = (preprocessed_dir / rel).with_suffix(".png")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pil_img.save(str(out_path), format="PNG", optimize=True)
+        sha256 = hashlib.sha256(out_path.read_bytes()).hexdigest()
+
+        if sha256 in seen_hashes:
+            out_path.unlink(missing_ok=True)
+            duplicates_skipped += 1
+            continue
+        seen_hashes.add(sha256)
+
+        width, height = pil_img.size
+        rows.append(
+            {
+                "image": str(out_path),
+                "doc_id": sha256[:16],
+                "filename": src_path.name,
+                "category": "ราชกิจจา",
+                "subcategory": "constituencies",
+                "source_repo": RAJAKITCHA_SOURCE_REPO,
+                "width": width,
+                "height": height,
+                "sha256": sha256,
+                "ground_truth_text": "",
+                "gt_status": "unverified",
+                "quality_tags": detect_quality_tags(pil_img),
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("No images processed for rajakitcha.")
+
+    features = Features(
+        {
+            "image": Image(),
+            "doc_id": Value("string"),
+            "filename": Value("string"),
+            "category": Value("string"),
+            "subcategory": Value("string"),
+            "source_repo": Value("string"),
+            "width": Value("int32"),
+            "height": Value("int32"),
+            "sha256": Value("string"),
+            "ground_truth_text": Value("string"),
+            "gt_status": Value("string"),
+            "quality_tags": Sequence(Value("string")),
+        }
+    )
+
+    ds = Dataset.from_list(rows, features=features)
+    ds_dict = DatasetDict({"train": ds})
+    if hf_dir.exists():
+        shutil.rmtree(hf_dir)
+    ds_dict.save_to_disk(str(hf_dir))
+
+    stats = {
+        "config_name": "rajakitcha",
+        "split": "train",
+        "total_pages": len(rows),
+        "total_documents": len(rows),
+        "duplicates_skipped": duplicates_skipped,
+        "max_edge": max_edge,
+        "category": "ราชกิจจา",
+        "subcategory": "constituencies",
+        "source_repo": RAJAKITCHA_SOURCE_REPO,
+    }
+    stats_path = RAJAKITCHA_DIR / "dataset_stats.json"
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Built Rajakitcha HF Dataset: {stats['total_pages']} pages (dups skipped={duplicates_skipped}) -> {hf_dir}")
+    return stats
+
+
+def main_rajakitcha(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Preprocess Rajakitcha (Royal Gazette) images and build HF dataset."
+    )
+    parser.add_argument("--raw-dir", type=Path, default=RAJAKITCHA_RAW_DIR)
+    parser.add_argument("--preprocessed-dir", type=Path, default=RAJAKITCHA_PREPROCESSED_DIR)
+    parser.add_argument("--hf-dir", type=Path, default=RAJAKITCHA_HF_DIR)
+    parser.add_argument("--max-edge", type=int, default=3508)
+    args = parser.parse_args(argv)
+    build_rajakitcha_dataset(
         raw_dir=args.raw_dir,
         preprocessed_dir=args.preprocessed_dir,
         hf_dir=args.hf_dir,

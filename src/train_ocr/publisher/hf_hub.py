@@ -19,6 +19,8 @@ from train_ocr.common.settings import (
     HF_REPO_ID,
     INTERN_SODA_DIR,
     INTERN_SODA_KRUT_HF_DIR,
+    RAJAKITCHA_DIR,
+    RAJAKITCHA_HF_DIR,
     SARABAN_DIR,
     SARABAN_HF_DIR,
     load_hf_token,
@@ -101,6 +103,14 @@ def merge_hub_yaml(hub_yaml: str, repo_files: list[str]) -> str:
             "config_name": "intern_soda_krut",
             "data_files": [{"split": "train", "path": krut_path}],
         }
+    rajakitcha_path = "data/rajakitcha/train-*" if any(f.startswith("data/rajakitcha/") for f in repo_files) else "rajakitcha/train-*"
+    if "rajakitcha" not in existing_configs and any(
+        f.startswith(rajakitcha_path.split("*")[0]) for f in repo_files
+    ):
+        existing_configs["rajakitcha"] = {
+            "config_name": "rajakitcha",
+            "data_files": [{"split": "train", "path": rajakitcha_path}],
+        }
     if existing_configs:
         meta["configs"] = list(existing_configs.values())
 
@@ -115,6 +125,7 @@ def build_combined_readme(
     google_stats: dict | None = None,
     dla_bulk_stats: dict | None = None,
     intern_soda_krut_stats: dict | None = None,
+    rajakitcha_stats: dict | None = None,
 ) -> str:
     """Build a Dataset Card covering all benchmark & training configs."""
     yaml_str = merge_hub_yaml(hub_yaml, repo_files or [])
@@ -128,6 +139,7 @@ def build_combined_readme(
         "- **`google_docs`**: Web-crawled Thai government & local administration document images (108 images, **96 `human_verified`** GT).\n",
         "- **`dla_bulk`**: High-coverage multi-portal collection from `www.dla.go.th` & `sll.dla.go.th` (official letters, local laws, articles, legal opinions, 200 DPI, PDPA-screened).\n",
         "- **`intern_soda_krut`**: Thai government documents containing the official Garuda emblem (*ตราครุฑ*), contributed by **Intern-SODA** (`train_kruthdetect/DATA/has_krut`).\n",
+        "- **`rajakitcha`**: Royal Gazette (*ราชกิจจานุเบกษา*) constituency announcement pages from `KittapatR/Thai-OCR-open-source-initiative` (87 images, **20 `human_verified`** GT).\n",
     ]
 
     # Top-level Human-Verified Ground Truth Summary
@@ -152,11 +164,19 @@ def build_combined_readme(
         default_hv = sum(1 for a in d_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
         default_fl = sum(1 for a in d_anns if a.get("gt_status") == "flagged")
 
-    total_hv = saraban_hv + google_hv + default_hv
+    rajakitcha_hv, rajakitcha_fl = 0, 0
+    rajakitcha_ann_path = RAJAKITCHA_DIR / "gt" / "gt_annotations.jsonl"
+    if rajakitcha_ann_path.exists():
+        r_anns = [json.loads(l) for l in rajakitcha_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rajakitcha_hv = sum(1 for a in r_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+        rajakitcha_fl = sum(1 for a in r_anns if a.get("gt_status") == "flagged")
+
+    total_hv = saraban_hv + google_hv + default_hv + rajakitcha_hv
     if total_hv > 0:
         s_total = saraban_stats["total_pages"] if saraban_stats else 419
         g_total = google_stats["total_pages"] if google_stats else 108
         d_total = default_stats["total_pages"] if default_stats else 319
+        r_total = rajakitcha_stats["total_pages"] if rajakitcha_stats else 87
         sections.append(
             f"""## Human-Verified Ground Truth Summary
 
@@ -169,6 +189,7 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
 | `google_docs` | `test` | {g_total:,} | **{google_hv:,}** | {google_fl:,} | {max(0, g_total - google_hv - google_fl):,} | Drafted with **iApp OpenThai OCR 2.1** + human-verified via Review UI |
 | `dla_bulk` | `train` | {dla_bulk_stats['total_pages'] if dla_bulk_stats else 1649:,} | 0 | 0 | {dla_bulk_stats['total_pages'] if dla_bulk_stats else 1649:,} | Pre-training / layout corpus (with `embedded_text_preview`) |
 | `intern_soda_krut` | `train` | {intern_soda_krut_stats['total_pages'] if intern_soda_krut_stats else 446:,} | 0 | 0 | {intern_soda_krut_stats['total_pages'] if intern_soda_krut_stats else 446:,} | Garuda-stamped corpus (`has_krut == True`, credit: Intern-SODA) |
+| `rajakitcha` | `train` | {r_total:,} | **{rajakitcha_hv:,}** | {rajakitcha_fl:,} | {max(0, r_total - rajakitcha_hv - rajakitcha_fl):,} | Royal Gazette (*ราชกิจจานุเบกษา*) drafted with **iApp OpenThai OCR 2.1** + human-verified via Review UI |
 
 > **Tip:** Filter verified Ground Truth rows directly with `ds.filter(lambda x: x["gt_status"] == "human_verified")`. Exclude `gt_status == "flagged"` (illegible/corrupted/unsuitable pages) during OCR accuracy evaluation.
 """
@@ -357,6 +378,16 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
 """
         )
 
+    if rajakitcha_stats:
+        sections.append(
+            f"""## Config 6: `rajakitcha` (Royal Gazette / ราชกิจจานุเบกษา)
+
+- **Total Images (`{rajakitcha_stats.get('split', 'train')}` split):** {rajakitcha_stats['total_pages']:,} images (EXIF-normalized RGB PNG, deduplicated)
+- **Max Edge:** {rajakitcha_stats.get('max_edge', 3508)} px
+- **Source:** `KittapatR/Thai-OCR-open-source-initiative` (`Example/Constituencies`) — Royal Gazette (*ราชกิจจานุเบกษา*) constituency announcement pages.
+"""
+        )
+
     sections.append(
         """## Acknowledgments & Credits
 
@@ -410,6 +441,9 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
         elif config_name == "intern_soda_krut":
             ds_dir = INTERN_SODA_KRUT_HF_DIR
             stats_path = INTERN_SODA_DIR / "dataset_stats_krut.json"
+        elif config_name == "rajakitcha":
+            ds_dir = RAJAKITCHA_HF_DIR
+            stats_path = RAJAKITCHA_DIR / "dataset_stats.json"
         else:
             ds_dir = HF_DATASET_DIR
             stats_path = DATA_DIR / "dataset_stats.json"
@@ -445,6 +479,7 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
     google_stats_path = GOOGLE_CRAWL_DIR / "dataset_stats.json"
     dla_bulk_stats_path = DLA_BULK_DIR / "dataset_stats.json"
     intern_soda_krut_stats_path = INTERN_SODA_DIR / "dataset_stats_krut.json"
+    rajakitcha_stats_path = RAJAKITCHA_DIR / "dataset_stats.json"
     default_stats = (
         json.loads(default_stats_path.read_text(encoding="utf-8"))
         if default_stats_path.exists()
@@ -470,6 +505,11 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
         if intern_soda_krut_stats_path.exists()
         else None
     )
+    rajakitcha_stats = (
+        json.loads(rajakitcha_stats_path.read_text(encoding="utf-8"))
+        if rajakitcha_stats_path.exists()
+        else None
+    )
 
     api = HfApi(token=hf_token)
     repo_files = api.list_repo_files(HF_REPO_ID, repo_type="dataset")
@@ -484,6 +524,7 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
             google_stats=google_stats,
             dla_bulk_stats=dla_bulk_stats,
             intern_soda_krut_stats=intern_soda_krut_stats,
+            rajakitcha_stats=rajakitcha_stats,
         ),
         encoding="utf-8",
     )
@@ -502,7 +543,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Push dataset config to Hugging Face Hub.")
     parser.add_argument(
         "--config-name",
-        choices=["default", "saraban_6types", "google_docs", "dla_bulk", "intern_soda_krut"],
+        choices=["default", "saraban_6types", "google_docs", "dla_bulk", "intern_soda_krut", "rajakitcha"],
         default="default",
     )
     parser.add_argument(

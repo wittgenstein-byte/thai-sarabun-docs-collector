@@ -9,10 +9,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from config import DATA_DIR, GOLDEN_DRAFTS_PATH, GOLDEN_MANIFEST_PATH, GT_ANNOTATIONS_PATH
-from train_ocr.common.settings import GOOGLE_CRAWL_DIR
+from train_ocr.common.settings import GOOGLE_CRAWL_DIR, RAJAKITCHA_DIR
 
 GOOGLE_GT_DIR = GOOGLE_CRAWL_DIR / "gt"
 DEFAULT_GT_DIR = DATA_DIR / "default_gt"
+RAJAKITCHA_GT_DIR = RAJAKITCHA_DIR / "gt"
 _ACTIVE_DATASET = "saraban"
 
 
@@ -28,6 +29,12 @@ def _get_paths() -> tuple[Path, Path, Path]:
             DEFAULT_GT_DIR / "default_manifest.jsonl",
             DEFAULT_GT_DIR / "dual_drafts.jsonl",
             DEFAULT_GT_DIR / "gt_annotations.jsonl",
+        )
+    if _ACTIVE_DATASET == "rajakitcha":
+        return (
+            RAJAKITCHA_GT_DIR / "rajakitcha_manifest.jsonl",
+            RAJAKITCHA_GT_DIR / "dual_drafts.jsonl",
+            RAJAKITCHA_GT_DIR / "gt_annotations.jsonl",
         )
     return GOLDEN_MANIFEST_PATH, GOLDEN_DRAFTS_PATH, GT_ANNOTATIONS_PATH
 
@@ -189,6 +196,20 @@ HTML_PAGE = """<!DOCTYPE html>
   textarea { width: 100%; min-height: 260px; background: #0f172a; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 10px; font-family: "Sarabun", monospace; font-size: 14px; line-height: 1.55; resize: vertical; }
   .kie-grid { display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; align-items: center; font-size: 13px; }
   .kie-grid input { width: 100%; background: #0f172a; color: #f8fafc; border: 1px solid #475569; border-radius: 5px; padding: 5px 8px; font-size: 13px; }
+  .gt-tabs { display: flex; gap: 4px; }
+  .gt-tabs button { padding: 2px 8px; font-size: 12px; }
+  .gt-tabs button.active { background: #0284c7; border-color: #0369a1; font-weight: 600; }
+  .gt-split { display: flex; flex-direction: column; gap: 8px; }
+  .preview-box { min-height: 180px; max-height: 360px; overflow: auto; background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 10px 12px; font-family: "Sarabun", "Segoe UI", sans-serif; font-size: 14px; line-height: 1.55; }
+  .preview-box h1, .preview-box h2, .preview-box h3, .preview-box h4 { margin: 8px 0 4px 0; color: #7dd3fc; }
+  .preview-box h1 { font-size: 17px; }
+  .preview-box h2 { font-size: 15px; }
+  .preview-box h3, .preview-box h4 { font-size: 14px; }
+  .preview-box p { margin: 4px 0; }
+  .preview-box table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  .preview-box th, .preview-box td { border: 1px solid #475569; padding: 5px 8px; text-align: left; vertical-align: top; }
+  .preview-box th { background: #1e293b; color: #e2e8f0; font-weight: 600; }
+  .preview-box tr:nth-child(even) td { background: rgba(30,41,59,0.45); }
   .tags { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
   .tags label { display: flex; align-items: center; gap: 4px; background: #0f172a; padding: 4px 8px; border-radius: 6px; border: 1px solid #334155; cursor: pointer; }
   .actions { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
@@ -201,6 +222,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <select id="filterMode" onchange="applyFilter()">
     <option value="all">All</option>
     <option value="unverified">Unverified Only</option>
+    <option value="has_table">Has Table Only</option>
     <option value="low_agree">Lowest Agreement First</option>
   </select>
   <button onclick="prevItem()">&larr; Prev</button>
@@ -235,8 +257,21 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
-      <h3><span>Ground Truth Markdown (Ctrl+Enter = Verify &amp; Next)</span><span id="statusBadge" class="pill"></span></h3>
-      <textarea id="gtEditor"></textarea>
+      <h3>
+        <span>Ground Truth Markdown (Ctrl+Enter = Verify &amp; Next)</span>
+        <span style="display:flex;gap:8px;align-items:center;">
+          <span class="gt-tabs">
+            <button id="tabSplit" class="active" onclick="setGtMode('split')">Split</button>
+            <button id="tabPreview" onclick="setGtMode('preview')">Table Preview</button>
+            <button id="tabEdit" onclick="setGtMode('edit')">Raw Edit</button>
+          </span>
+          <span id="statusBadge" class="pill"></span>
+        </span>
+      </h3>
+      <div class="gt-split">
+        <div id="gtPreview" class="preview-box"></div>
+        <textarea id="gtEditor" oninput="renderPreview()"></textarea>
+      </div>
     </div>
 
     <div class="panel">
@@ -288,6 +323,66 @@ function wordDiffHtml(a, b) {
 }
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+let gtMode = 'split';
+function setGtMode(mode) {
+  gtMode = mode;
+  document.getElementById('tabSplit').classList.toggle('active', mode === 'split');
+  document.getElementById('tabPreview').classList.toggle('active', mode === 'preview');
+  document.getElementById('tabEdit').classList.toggle('active', mode === 'edit');
+  document.getElementById('gtPreview').style.display = mode === 'edit' ? 'none' : 'block';
+  document.getElementById('gtEditor').style.display = mode === 'preview' ? 'none' : 'block';
+  if (mode === 'preview') document.getElementById('gtPreview').style.maxHeight = '520px';
+  else document.getElementById('gtPreview').style.maxHeight = '300px';
+}
+
+function renderMarkdownWithTables(src) {
+  if (!src || !src.trim()) return '<span style="color:#64748b">(Empty)</span>';
+  // Preserve <table>...</table> blocks verbatim while rendering surrounding Markdown
+  const parts = src.split(/(<table\\b[\\s\\S]*?<\\/table>)/gi);
+  return parts.map(part => {
+    if (/^<table\\b/i.test(part.trim())) return part;
+    const lines = part.split(/\\r?\\n/);
+    let out = '', inPipeTable = false, tableRows = [];
+    const flushTable = () => {
+      if (!tableRows.length) return;
+      out += '<table>';
+      tableRows.forEach((row, idx) => {
+        if (idx === 1 && row.every(c => /^:?-{2,}:?$/.test(c.trim()))) return;
+        const tag = (idx === 0 && tableRows.length > 1 && tableRows[1].every(c => /^:?-{2,}:?$/.test(c.trim()))) ? 'th' : 'td';
+        out += '<tr>' + row.map(c => `<${tag}>${esc(c.trim())}</${tag}>`).join('') + '</tr>';
+      });
+      out += '</table>';
+      tableRows = [];
+      inPipeTable = false;
+    };
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2) {
+        inPipeTable = true;
+        tableRows.push(trimmed.slice(1, -1).split('|'));
+        continue;
+      }
+      if (inPipeTable) flushTable();
+      const hm = line.match(/^(#{1,6})\\s+(.*)$/);
+      if (hm) {
+        const lvl = hm[1].length;
+        out += `<h${lvl}>${esc(hm[2])}</h${lvl}>`;
+      } else if (!trimmed) {
+        out += '<br/>';
+      } else {
+        out += `<p>${esc(line).replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')}</p>`;
+      }
+    }
+    if (inPipeTable) flushTable();
+    return out;
+  }).join('');
+}
+
+function renderPreview() {
+  const txt = document.getElementById('gtEditor').value;
+  document.getElementById('gtPreview').innerHTML = renderMarkdownWithTables(txt);
+}
+
 async function init() {
   const res = await fetch('/api/items');
   const data = await res.json();
@@ -311,6 +406,10 @@ function updateProgress() {
 function applyFilter() {
   const mode = document.getElementById('filterMode').value;
   if (mode === 'unverified') filtered = allItems.filter(x => x.gt_status !== 'human_verified');
+  else if (mode === 'has_table') filtered = allItems.filter(x => {
+    const t = x.ground_truth_text || '';
+    return /<table\\b/i.test(t) || /^\\|.*\\|$/m.test(t);
+  });
   else if (mode === 'low_agree') filtered = [...allItems].sort((a,b) => a.agreement_score - b.agreement_score);
   else filtered = [...allItems];
   cur = 0;
@@ -334,6 +433,7 @@ function renderCurrent() {
   ].join('');
   document.getElementById('diffBox').innerHTML = wordDiffHtml(it.gemini_markdown, it.iapp_markdown);
   document.getElementById('gtEditor').value = it.ground_truth_text || '';
+  renderPreview();
   document.getElementById('kieDocNo').value = (it.kie && it.kie.doc_no) || '';
   document.getElementById('kieDocDate').value = (it.kie && it.kie.doc_date) || '';
   document.getElementById('kieSubject').value = (it.kie && it.kie.subject) || '';
@@ -362,6 +462,7 @@ function copyDraft(which) {
   if (!it) return;
   const txt = which === 'gemini' ? it.gemini_markdown : which === 'iapp' ? it.iapp_markdown : it.embedded_text_preview;
   document.getElementById('gtEditor').value = txt || '';
+  renderPreview();
 }
 function prevItem() { if (cur > 0) { cur--; renderCurrent(); } }
 function nextItem() { if (cur < filtered.length - 1) { cur++; renderCurrent(); } }
@@ -410,7 +511,7 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Launch Human-in-the-Loop GT Review UI.")
-    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default"], default="saraban")
+    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default", "rajakitcha"], default="saraban")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()

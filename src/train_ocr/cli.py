@@ -37,6 +37,11 @@ SUBCOMMANDS: dict[str, tuple[str, str, str]] = {
         "main",
         "Collect Thai government document images via AutoCrawler adapter",
     ),
+    "collect-rajakitcha": (
+        "train_ocr.collectors.rajakitcha",
+        "main",
+        "Collect Rajakitcha (Royal Gazette) document images from GitHub",
+    ),
     "scan-general": (
         "train_ocr.screener.pdf_scanner",
         "main_general",
@@ -81,6 +86,11 @@ SUBCOMMANDS: dict[str, tuple[str, str, str]] = {
         "train_ocr.dataset.builder",
         "main_intern_soda_krut",
         "Preprocess Intern-SODA Garuda (has_krut) documents and build HF dataset",
+    ),
+    "build-rajakitcha": (
+        "train_ocr.dataset.builder",
+        "main_rajakitcha",
+        "Preprocess Rajakitcha (Royal Gazette) images and build HF dataset",
     ),
     "push-hf": (
         "train_ocr.publisher.hf_hub",
