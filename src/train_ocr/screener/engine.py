@@ -14,6 +14,19 @@ from train_ocr.common.saraban_rules import (
 )
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+NON_DOC_TITLE_KEYWORDS = (
+    "อินโฟกราฟิก",
+    "infographic",
+    "โปสเตอร์",
+    "poster",
+    "แผ่นพับ",
+    "แบนเนอร์",
+    "banner",
+    "ปฏิทิน",
+    "การ์ตูน",
+    "วิชาการ weekly",
+    "จุลสารประชาสัมพันธ์",
+)
 GOV_MARKERS = (
     "เรื่อง",
     "เรียน",
@@ -118,6 +131,60 @@ class OCRScreener:
             "ocr_chars": char_count,
             "has_gov_marker": has_gov_marker,
             "has_pii": has_pii,
+            "status": "rejected" if reasons else "kept",
+            "reasons": reasons,
+        }
+
+    def screen_pdf_page_graphic(
+        self,
+        pil_img: Image.Image,
+        title: str = "",
+        embedded_chars: int = 0,
+        max_vivid_ratio: float = 0.12,
+        min_paper_bg_ratio: float = 0.70,
+        min_aspect_ratio: float = 0.58,
+        max_aspect_ratio: float = 1.50,
+        min_boxes: int = 6,
+        min_chars: int = 60,
+    ) -> dict[str, Any]:
+        """Screen a rendered PDF page to reject photos, posters, infographics, colorful covers, and slides."""
+        rgb = pil_img.convert("RGB")
+        w, h = rgb.size
+        ar = round(w / max(1, h), 3)
+
+        title_lower = (title or "").lower()
+        reasons: list[str] = []
+        if any(kw in title_lower for kw in NON_DOC_TITLE_KEYWORDS):
+            reasons.append("poster_keyword")
+        if ar < min_aspect_ratio or ar > max_aspect_ratio:
+            reasons.append(f"slide_or_banner_ar({ar})")
+
+        sm = rgb.resize((240, max(1, int(240 * h / max(1, w)))), Image.Resampling.BILINEAR)
+        hsv = np.asarray(sm.convert("HSV"), dtype=np.float32)
+        s_ch, v_ch = hsv[:, :, 1], hsv[:, :, 2]
+        vivid_ratio = round(float(np.mean((s_ch > 85) & (v_ch > 50))), 4)
+        paper_bg_ratio = round(float(np.mean((s_ch < 60) & (v_ch > 150))), 4)
+
+        if vivid_ratio > max_vivid_ratio:
+            reasons.append(f"high_vivid_color({vivid_ratio})")
+        if paper_bg_ratio < min_paper_bg_ratio:
+            reasons.append(f"non_paper_bg({paper_bg_ratio})")
+
+        ocr_boxes = 0
+        ocr_chars = 0
+        if not reasons and embedded_chars < 80:
+            ocr_boxes, ocr_chars, _ = self.extract_ocr_stats(rgb)
+            if ocr_boxes < min_boxes or ocr_chars < min_chars:
+                reasons.append(f"low_text_density(boxes={ocr_boxes},chars={ocr_chars})")
+
+        return {
+            "width": w,
+            "height": h,
+            "aspect_ratio": ar,
+            "vivid_ratio": vivid_ratio,
+            "paper_bg_ratio": paper_bg_ratio,
+            "ocr_boxes": ocr_boxes,
+            "ocr_chars": ocr_chars,
             "status": "rejected" if reasons else "kept",
             "reasons": reasons,
         }

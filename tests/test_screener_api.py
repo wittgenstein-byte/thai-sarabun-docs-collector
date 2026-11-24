@@ -193,3 +193,40 @@ def test_filter_directory_preserves_subfolders_and_deduplicates(
         r["status"] == "rejected" and any(reason.startswith("duplicate(") for reason in r["reasons"])
         for r in dup_rec
     )
+
+
+def test_screen_pdf_page_graphic_filters_posters_and_slides() -> None:
+    sample_lines = [
+        "ที่ มท 0808.2/ว 1234",
+        "กรมส่งเสริมการปกครองท้องถิ่น",
+        "เรื่อง แนวทางปฏิบัติ",
+        "เรียน ผู้ว่าราชการจังหวัด",
+        "ตามหนังสือที่อ้างถึง",
+        "ขอแสดงความนับถือ ลงชื่อ",
+    ]
+    screener = OCRScreener(ocr_engine=_StubRapidOCR(sample_lines))
+
+    # 1. White document page with small 3% red stamp -> kept
+    doc_img = Image.new("RGB", (900, 1200), (250, 250, 250))
+    arr = np.array(doc_img)
+    arr[50:150, 50:320] = [220, 20, 20]  # ~2.5% red stamp
+    res_doc = screener.screen_pdf_page_graphic(Image.fromarray(arr), title="แผนพัฒนาท้องถิ่น", embedded_chars=0)
+    assert res_doc["status"] == "kept", res_doc
+
+    # 2. Colorful poster / dark cover -> rejected
+    poster_img = Image.new("RGB", (900, 1200), (20, 140, 220))
+    res_poster = screener.screen_pdf_page_graphic(poster_img, title="รายงานประจำปี", embedded_chars=200)
+    assert res_poster["status"] == "rejected"
+    assert any("high_vivid_color" in r for r in res_poster["reasons"])
+    assert any("non_paper_bg" in r for r in res_poster["reasons"])
+
+    # 3. 16:9 slide -> rejected
+    slide_img = Image.new("RGB", (1600, 900), (250, 250, 250))
+    res_slide = screener.screen_pdf_page_graphic(slide_img, title="นำเสนอ", embedded_chars=200)
+    assert res_slide["status"] == "rejected"
+    assert any("slide_or_banner_ar" in r for r in res_slide["reasons"])
+
+    # 4. Poster keyword in title -> rejected
+    res_kw = screener.screen_pdf_page_graphic(doc_img, title="วิชาการ Weekly ฉบับที่ 10", embedded_chars=200)
+    assert res_kw["status"] == "rejected"
+    assert "poster_keyword" in res_kw["reasons"]
