@@ -123,12 +123,56 @@ def build_combined_readme(
         f"---\n{yaml_str}\n---\n",
         "# Thai Government PDF OCR Test Benchmark (`narawit16/thai-govern-test-ocr`)\n",
         "An evaluation benchmark and training corpus of **Thai government documents** designed for OCR, layout analysis, and VLM document-parsing:\n",
-        "- **`default`**: Broad cross-agency Thai open government PDFs from `data.go.th` (15 domain groups, 111 agencies, 200 DPI).\n",
+        "- **`default`**: Broad cross-agency Thai open government PDFs from `data.go.th` (15 domain groups, 111 agencies, 200 DPI, **111 `human_verified`** GT).\n",
         "- **`saraban_6types`**: Curated **6 official Thai Saraban correspondence types** (*ระเบียบสำนักนายกรัฐมนตรีว่าด้วยงานสารบรรณ*) from `dla.go.th` & `data.go.th` (300 DPI, PDPA-screened, with human-verified Golden Set Ground Truth).\n",
-        "- **`google_docs`**: Web-crawled Thai government & local administration document images.\n",
+        "- **`google_docs`**: Web-crawled Thai government & local administration document images (108 images, **96 `human_verified`** GT).\n",
         "- **`dla_bulk`**: High-coverage multi-portal collection from `www.dla.go.th` & `sll.dla.go.th` (official letters, local laws, articles, legal opinions, 200 DPI, PDPA-screened).\n",
         "- **`intern_soda_krut`**: Thai government documents containing the official Garuda emblem (*ตราครุฑ*), contributed by **Intern-SODA** (`train_kruthdetect/DATA/has_krut`).\n",
     ]
+
+    # Top-level Human-Verified Ground Truth Summary
+    saraban_hv, saraban_fl = 0, 0
+    saraban_ann_path = SARABAN_DIR / "golden_120" / "gt_annotations.jsonl"
+    if saraban_ann_path.exists():
+        s_anns = [json.loads(l) for l in saraban_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        saraban_hv = sum(1 for a in s_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+        saraban_fl = sum(1 for a in s_anns if a.get("gt_status") == "flagged")
+
+    google_hv, google_fl = 0, 0
+    google_ann_path = GOOGLE_CRAWL_DIR / "gt" / "gt_annotations.jsonl"
+    if google_ann_path.exists():
+        g_anns = [json.loads(l) for l in google_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        google_hv = sum(1 for a in g_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+        google_fl = sum(1 for a in g_anns if a.get("gt_status") == "flagged")
+
+    default_hv, default_fl = 0, 0
+    default_ann_path = DATA_DIR / "default_gt" / "gt_annotations.jsonl"
+    if default_ann_path.exists():
+        d_anns = [json.loads(l) for l in default_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        default_hv = sum(1 for a in d_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+        default_fl = sum(1 for a in d_anns if a.get("gt_status") == "flagged")
+
+    total_hv = saraban_hv + google_hv + default_hv
+    if total_hv > 0:
+        s_total = saraban_stats["total_pages"] if saraban_stats else 419
+        g_total = google_stats["total_pages"] if google_stats else 108
+        d_total = default_stats["total_pages"] if default_stats else 319
+        sections.append(
+            f"""## Human-Verified Ground Truth Summary
+
+Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
+
+| Config | Split | Total | `human_verified` | `flagged` | `unverified` | Draft / Verification Workflow |
+|---|---|---:|---:|---:|---:|---|
+| `saraban_6types` | `test` | {s_total:,} | **{saraban_hv:,}** | {saraban_fl:,} | {max(0, s_total - saraban_hv - saraban_fl):,} | Golden Set (`is_golden_set == True`) dual-drafted + human-verified via Review UI |
+| `default` | `test` | {d_total:,} | **{default_hv:,}** | {default_fl:,} | {max(0, d_total - default_hv - default_fl):,} | Stratified 120-page subset dual-drafted via KKU VLMs + human-verified via Review UI |
+| `google_docs` | `test` | {g_total:,} | **{google_hv:,}** | {google_fl:,} | {max(0, g_total - google_hv - google_fl):,} | Drafted with **iApp OpenThai OCR 2.1** + human-verified via Review UI |
+| `dla_bulk` | `train` | {dla_bulk_stats['total_pages'] if dla_bulk_stats else 1649:,} | 0 | 0 | {dla_bulk_stats['total_pages'] if dla_bulk_stats else 1649:,} | Pre-training / layout corpus (with `embedded_text_preview`) |
+| `intern_soda_krut` | `train` | {intern_soda_krut_stats['total_pages'] if intern_soda_krut_stats else 446:,} | 0 | 0 | {intern_soda_krut_stats['total_pages'] if intern_soda_krut_stats else 446:,} | Garuda-stamped corpus (`has_krut == True`, credit: Intern-SODA) |
+
+> **Tip:** Filter verified Ground Truth rows directly with `ds.filter(lambda x: x["gt_status"] == "human_verified")`. Exclude `gt_status == "flagged"` (illegible/corrupted/unsuitable pages) during OCR accuracy evaluation.
+"""
+        )
 
     if saraban_stats:
         st_rows = "\n".join(
@@ -214,6 +258,14 @@ def build_combined_readme(
                 default_stats["by_page_type"].items(), key=lambda x: x[1], reverse=True
             )
         )
+        default_gt_block = ""
+        if default_ann_path.exists():
+            default_gt_block = f"""
+### Human-Verified Ground Truth
+- **Verified GT Pages (`gt_status == "human_verified"`):** {default_hv:,} / {default_stats['total_pages']:,} pages (`flagged`: {default_fl:,})
+- **Draft Engine & Verification:** Stratified 120-page subset dual-drafted via KKU VLMs (`gemini-4-hydrogen`, `gemma4-26b`, `qwen3.8-27b`), then human-verified via Review UI.
+- **GT Columns:** Full-page Markdown in `ground_truth_text`, KIE Header JSON (`doc_no`, `doc_date`, `subject`) in `gt_kie_json`, and `quality_tags`.
+"""
         sections.append(
             f"""## Config 2: `default` (General `data.go.th` Multi-Domain Benchmark)
 
@@ -221,7 +273,7 @@ def build_combined_readme(
 - **Resolution:** {default_stats['dpi']} DPI (RGB PNG)
 - **Stratification:** {default_stats['scanned_share_pct']}% Scanned / {default_stats['digital_share_pct']}% Complex Digital
 - **Document-Only Filtering:** Excluded {default_stats.get('graphic_rejected_pages', 0):,} non-document graphic pages (posters, infographics, colorful covers, 16:9 slides).
-
+{default_gt_block}
 ### Page Type Breakdown
 | `page_type` | Pages |
 |---|---:|
@@ -241,12 +293,20 @@ def build_combined_readme(
                 google_stats["by_keyword"].items(), key=lambda x: x[1], reverse=True
             )
         )
+        google_gt_block = ""
+        if google_ann_path.exists():
+            google_gt_block = f"""
+### Human-Verified Ground Truth
+- **Verified GT Images (`gt_status == "human_verified"`):** {google_hv:,} / {google_stats['total_pages']:,} images (`flagged`: {google_fl:,})
+- **Draft Engine & Verification:** Pre-filled with **iApp OpenThai OCR 2.1** (`api.iapp.co.th/v3/store/ocr/document/markdown`), then reviewed and corrected page-by-page via the Human-in-the-Loop Review UI.
+- **GT Columns:** Full-page Markdown in `ground_truth_text`, KIE Header JSON (`doc_no`, `doc_date`, `subject`) in `gt_kie_json`, and document quality tags in `quality_tags`.
+"""
         sections.append(
             f"""## Config 3: `google_docs` (Web-Crawled Thai Government & Local Admin Documents)
 
 - **Total Images (`test` split):** {google_stats['total_pages']:,} images (EXIF-normalized RGB PNG, deduplicated, PDPA-screened)
 - **Max Edge:** {google_stats.get('max_edge', 3508)} px
-
+{google_gt_block}
 ### Breakdown by Search Keyword
 | `keyword` | Images |
 |---|---:|
@@ -313,8 +373,15 @@ scanned_letters = saraban.filter(
     lambda x: x["saraban_type"] == "external_letter" and x["page_type"] == "scanned"
 )
 
-# Load the general data.go.th benchmark (200 DPI)
+# Load only human-verified Ground Truth samples from saraban_6types or google_docs
+saraban_gt = saraban.filter(lambda x: x["gt_status"] == "human_verified")
+google_gt = load_dataset("narawit16/thai-govern-test-ocr", "google_docs", split="test").filter(
+    lambda x: x["gt_status"] == "human_verified"
+)
+
+# Load the general data.go.th benchmark (200 DPI) and its human-verified GT subset
 general = load_dataset("narawit16/thai-govern-test-ocr", "default", split="test")
+general_gt = general.filter(lambda x: x["gt_status"] == "human_verified")
 ```
 
 > **Note on KIE Evaluation (`meta_doc_no`, `meta_doc_date`, `meta_subject`):**

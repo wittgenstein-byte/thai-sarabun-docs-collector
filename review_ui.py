@@ -8,10 +8,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from config import GOLDEN_DRAFTS_PATH, GOLDEN_MANIFEST_PATH, GT_ANNOTATIONS_PATH
+from config import DATA_DIR, GOLDEN_DRAFTS_PATH, GOLDEN_MANIFEST_PATH, GT_ANNOTATIONS_PATH
 from train_ocr.common.settings import GOOGLE_CRAWL_DIR
 
 GOOGLE_GT_DIR = GOOGLE_CRAWL_DIR / "gt"
+DEFAULT_GT_DIR = DATA_DIR / "default_gt"
 _ACTIVE_DATASET = "saraban"
 
 
@@ -21,6 +22,12 @@ def _get_paths() -> tuple[Path, Path, Path]:
             GOOGLE_GT_DIR / "google_manifest.jsonl",
             GOOGLE_GT_DIR / "dual_drafts.jsonl",
             GOOGLE_GT_DIR / "gt_annotations.jsonl",
+        )
+    if _ACTIVE_DATASET == "default":
+        return (
+            DEFAULT_GT_DIR / "default_manifest.jsonl",
+            DEFAULT_GT_DIR / "dual_drafts.jsonl",
+            DEFAULT_GT_DIR / "gt_annotations.jsonl",
         )
     return GOLDEN_MANIFEST_PATH, GOLDEN_DRAFTS_PATH, GT_ANNOTATIONS_PATH
 
@@ -403,7 +410,7 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Launch Human-in-the-Loop GT Review UI.")
-    parser.add_argument("--dataset", choices=["saraban", "google_docs"], default="saraban")
+    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default"], default="saraban")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()

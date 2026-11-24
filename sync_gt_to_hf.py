@@ -9,13 +9,16 @@ from datasets import Dataset, DatasetDict, Value
 from huggingface_hub import HfApi
 
 from config import (
+    DATA_DIR,
     GOLDEN_DIR,
     GOLDEN_MANIFEST_PATH,
     GT_ANNOTATIONS_PATH,
+    HF_DATASET_DIR,
     HF_REPO_ID,
     SARABAN_HF_DIR,
     load_hf_token,
 )
+from train_ocr.common.settings import GOOGLE_CRAWL_DIR, GOOGLE_HF_DIR
 
 
 def export_groundtruth_backup() -> Path:
@@ -59,14 +62,23 @@ def export_groundtruth_backup() -> Path:
 
     print(f"Exported text backup: gt_annotations.jsonl + {md_count} .md files -> {backup_dir}")
     return backup_dir
-from train_ocr.common.settings import GOOGLE_CRAWL_DIR, GOOGLE_HF_DIR
 
 
 def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
+    if dataset_name == "google_docs":
+        hf_dir = GOOGLE_HF_DIR
+        ann_path = GOOGLE_CRAWL_DIR / "gt" / "gt_annotations.jsonl"
+        config_name = "google_docs"
+    elif dataset_name == "default":
+        hf_dir = HF_DATASET_DIR
+        ann_path = DATA_DIR / "default_gt" / "gt_annotations.jsonl"
+        config_name = "default"
+    else:
+        hf_dir = SARABAN_HF_DIR
+        ann_path = GT_ANNOTATIONS_PATH
+        config_name = "saraban_6types"
     is_google = dataset_name == "google_docs"
-    hf_dir = GOOGLE_HF_DIR if is_google else SARABAN_HF_DIR
-    ann_path = (GOOGLE_CRAWL_DIR / "gt" / "gt_annotations.jsonl") if is_google else GT_ANNOTATIONS_PATH
-    config_name = "google_docs" if is_google else "saraban_6types"
+    is_saraban = dataset_name == "saraban"
 
     if not hf_dir.exists():
         raise FileNotFoundError(f"HF dataset not found: {hf_dir}")
@@ -74,7 +86,7 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
         raise FileNotFoundError(f"No GT annotations found at {ann_path}")
 
     golden_ids: set[str] = set()
-    if not is_google and GOLDEN_MANIFEST_PATH.exists():
+    if is_saraban and GOLDEN_MANIFEST_PATH.exists():
         for line in GOLDEN_MANIFEST_PATH.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 golden_ids.add(json.loads(line)["sample_id"])
@@ -92,7 +104,7 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
     for i in range(len(ds)):
         row = dict(ds[i])
         sid = row["doc_id"] if is_google else f"{row['resource_id']}_p{row['page_num']}"
-        if not is_google:
+        if is_saraban:
             row["is_golden_set"] = sid in golden_ids
         ann = annotations.get(sid)
         if ann:
@@ -103,12 +115,22 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
             if row["gt_status"] == "human_verified":
                 verified_count += 1
         else:
+            row.setdefault("ground_truth_text", "")
+            row.setdefault("gt_status", "unverified")
+            row.setdefault("quality_tags", [])
             row.setdefault("gt_kie_json", "{}")
         updated_rows.append(row)
 
     features = ds.features.copy()
-    if not is_google:
+    if is_saraban:
         features["is_golden_set"] = Value("bool")
+    if "ground_truth_text" not in features:
+        features["ground_truth_text"] = Value("string")
+    if "gt_status" not in features:
+        features["gt_status"] = Value("string")
+    if "quality_tags" not in features:
+        from datasets import Sequence
+        features["quality_tags"] = Sequence(Value("string"))
     features["gt_kie_json"] = Value("string")
 
     new_ds = Dataset.from_list(updated_rows, features=features)
@@ -121,7 +143,7 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
     shutil.rmtree(hf_dir)
     tmp_dir.rename(hf_dir)
 
-    total = len(ds) if is_google else len(golden_ids)
+    total = len(golden_ids) if is_saraban else len(ds)
     print(f"Synced GT into {hf_dir}: {verified_count} human_verified / {total} pages")
     backup_dir = None if is_google else export_groundtruth_backup()
 
@@ -147,7 +169,7 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync gt_annotations.jsonl into HF dataset.")
-    parser.add_argument("--dataset", choices=["saraban", "google_docs"], default="saraban")
+    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default"], default="saraban")
     parser.add_argument("--push", action="store_true", help="Also push updated dataset to Hugging Face Hub.")
     args = parser.parse_args()
     sync_gt(dataset_name=args.dataset, push=args.push)
