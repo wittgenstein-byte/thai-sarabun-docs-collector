@@ -101,43 +101,27 @@ def scan_dla_bulk(
     return existing
 
 
-def _round_robin_by_source(
-    candidates: list[dict],
-    target_total: int | None,
-    max_pages_per_pdf: int,
-) -> list[dict]:
-    """Select pages balanced round-robin across DLA sources, respecting max_pages_per_pdf."""
+def _round_robin_order_by_source(candidates: list[dict]) -> list[dict]:
+    """Interleave candidates round-robin across DLA sources without truncating."""
     by_source: dict[str, list[dict]] = defaultdict(list)
     for row in candidates:
         by_source[row["source"]].append(row)
 
     source_order = sorted(by_source.keys(), key=lambda s: len(by_source[s]), reverse=True)
     pos = {s: 0 for s in source_order}
-    used_per_doc: dict[str, int] = defaultdict(int)
-    selected: list[dict] = []
+    ordered: list[dict] = []
 
     while source_order:
-        if target_total is not None and len(selected) >= target_total:
-            break
         next_sources = []
         for src in source_order:
-            if target_total is not None and len(selected) >= target_total:
-                break
             items = by_source[src]
-            picked = False
-            while pos[src] < len(items):
-                cand = items[pos[src]]
+            if pos[src] < len(items):
+                ordered.append(items[pos[src]])
                 pos[src] += 1
-                if used_per_doc[cand["doc_id"]] < max_pages_per_pdf:
-                    used_per_doc[cand["doc_id"]] += 1
-                    selected.append(cand)
-                    picked = True
-                    break
-            if picked and pos[src] < len(items):
-                next_sources.append(src)
+                if pos[src] < len(items):
+                    next_sources.append(src)
         source_order = next_sources
-
-    return selected
+    return ordered
 
 
 def build_dla_bulk_dataset(
@@ -152,8 +136,10 @@ def build_dla_bulk_dataset(
     split: str = "train",
     skip_pii: bool = True,
 ) -> dict[str, Any]:
-    """Render selected DLA bulk pages to RGB PNG and build a Hugging Face DatasetDict."""
+    """Render clean DLA bulk document pages (excluding posters/infographics/slides) and build HF DatasetDict."""
+    import shutil
     from datasets import Dataset, DatasetDict, Features, Image, Value
+    from train_ocr.screener.engine import NON_DOC_TITLE_KEYWORDS, OCRScreener
 
     manifest_map = {rec["doc_id"]: rec for rec in read_jsonl(manifest_path)}
     indexed = read_jsonl(page_index_path)
@@ -162,7 +148,10 @@ def build_dla_bulk_dataset(
 
     pii_excluded = 0
     other_excluded = 0
+    graphic_excluded = 0
+    reason_counts: Counter = Counter()
     pool: list[dict] = []
+
     for row in indexed:
         if skip_pii and (row.get("title_pii_flagged") or row.get("embedded_pii_flagged")):
             pii_excluded += 1
@@ -170,9 +159,14 @@ def build_dla_bulk_dataset(
         if row.get("page_type") == "other":
             other_excluded += 1
             continue
+        rec = manifest_map.get(row["doc_id"], {})
+        title_str = f"{rec.get('title', '')} {rec.get('original_filename', '')}".lower()
+        if any(kw in title_str for kw in NON_DOC_TITLE_KEYWORDS):
+            graphic_excluded += 1
+            reason_counts["poster_keyword"] += 1
+            continue
         pool.append(row)
 
-    # Prefer scanned & complex digital pages first
     priority = {"scanned": 0, "scanned_ocr": 1, "digital": 2}
     pool.sort(
         key=lambda r: (
@@ -181,19 +175,22 @@ def build_dla_bulk_dataset(
         )
     )
 
-    selected = _round_robin_by_source(pool, target_total=target_total, max_pages_per_pdf=max_pages_per_pdf)
-    if not selected:
+    ordered_candidates = _round_robin_order_by_source(pool)
+    if not ordered_candidates:
         raise RuntimeError("No eligible pages left after filtering.")
 
-    pages_by_doc: dict[str, list[dict]] = defaultdict(list)
-    for pm in selected:
-        pages_by_doc[pm["doc_id"]].append(pm)
-
+    screener = OCRScreener()
     pages_dir.mkdir(parents=True, exist_ok=True)
     scale = dpi / 72.0
     rows: list[dict[str, Any]] = []
+    used_per_doc: dict[str, int] = defaultdict(int)
 
-    for doc_id, page_metas in pages_by_doc.items():
+    for pm in ordered_candidates:
+        if target_total is not None and len(rows) >= target_total:
+            break
+        doc_id = pm["doc_id"]
+        if used_per_doc[doc_id] >= max_pages_per_pdf:
+            continue
         rec = manifest_map.get(doc_id)
         if not rec:
             continue
@@ -204,53 +201,65 @@ def build_dla_bulk_dataset(
         doc = None
         try:
             doc = pdfium.PdfDocument(str(pdf_path))
-            for pm in sorted(page_metas, key=lambda x: x["page_index"]):
-                idx = pm["page_index"]
-                if idx >= len(doc):
-                    continue
-                page = doc[idx]
-                try:
-                    bitmap = page.render(scale=scale)
-                    pil_img = bitmap.to_pil().convert("RGB")
-                    width, height = pil_img.size
-                finally:
-                    page.close()
-
-                out_dir = pages_dir / rec["source"]
-                out_dir.mkdir(parents=True, exist_ok=True)
-                img_path = out_dir / f"{doc_id}_p{pm['page_num']}.png"
-                pil_img.save(str(img_path), format="PNG")
-
-                rows.append(
-                    {
-                        "image": str(img_path),
-                        "doc_id": doc_id,
-                        "source": rec["source"],
-                        "subkey": rec.get("subkey", ""),
-                        "dept": rec.get("dept", ""),
-                        "doc_no": rec.get("doc_no", ""),
-                        "doc_date": rec.get("doc_date", ""),
-                        "title": rec.get("title", ""),
-                        "page_num": int(pm["page_num"]),
-                        "total_pages": int(pm["total_pages"]),
-                        "page_type": pm["page_type"],
-                        "image_coverage_ratio": float(pm["image_coverage_ratio"]),
-                        "embedded_text_chars": int(pm["embedded_text_chars"]),
-                        "embedded_text_preview": pm.get("embedded_text_preview", ""),
-                        "layout_complexity_score": float(pm["layout_complexity_score"]),
-                        "has_pua_mojibake": bool(pm.get("has_pua_mojibake", False)),
-                        "dpi": int(dpi),
-                        "width": int(width),
-                        "height": int(height),
-                        "source_url": rec.get("source_url", ""),
-                        "sha256": rec.get("sha256", ""),
-                    }
-                )
+            idx = pm["page_index"]
+            if idx >= len(doc):
+                continue
+            page = doc[idx]
+            try:
+                bitmap = page.render(scale=scale)
+                pil_img = bitmap.to_pil().convert("RGB")
+                width, height = pil_img.size
+            finally:
+                page.close()
         except Exception as exc:
             print(f"  [warn] Failed rendering {pdf_path.name}: {exc}")
+            continue
         finally:
             if doc is not None:
                 doc.close()
+
+        screen = screener.screen_pdf_page_graphic(
+            pil_img,
+            title=f"{rec.get('title', '')} {rec.get('original_filename', '')}",
+            embedded_chars=int(pm.get("embedded_text_chars", 0)),
+        )
+        if screen["status"] == "rejected":
+            graphic_excluded += 1
+            for r in screen["reasons"]:
+                reason_counts[r.split("(")[0]] += 1
+            continue
+
+        out_dir = pages_dir / rec["source"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        img_path = out_dir / f"{doc_id}_p{pm['page_num']}.png"
+        pil_img.save(str(img_path), format="PNG")
+
+        used_per_doc[doc_id] += 1
+        rows.append(
+            {
+                "image": str(img_path),
+                "doc_id": doc_id,
+                "source": rec["source"],
+                "subkey": rec.get("subkey", ""),
+                "dept": rec.get("dept", ""),
+                "doc_no": rec.get("doc_no", ""),
+                "doc_date": rec.get("doc_date", ""),
+                "title": rec.get("title", ""),
+                "page_num": int(pm["page_num"]),
+                "total_pages": int(pm["total_pages"]),
+                "page_type": pm["page_type"],
+                "image_coverage_ratio": float(pm["image_coverage_ratio"]),
+                "embedded_text_chars": int(pm["embedded_text_chars"]),
+                "embedded_text_preview": pm.get("embedded_text_preview", ""),
+                "layout_complexity_score": float(pm["layout_complexity_score"]),
+                "has_pua_mojibake": bool(pm.get("has_pua_mojibake", False)),
+                "dpi": int(dpi),
+                "width": int(width),
+                "height": int(height),
+                "source_url": rec.get("source_url", ""),
+                "sha256": rec.get("sha256", ""),
+            }
+        )
 
     features = Features(
         {
@@ -280,8 +289,13 @@ def build_dla_bulk_dataset(
 
     ds = Dataset.from_list(rows, features=features)
     ds_dict = DatasetDict({split: ds})
-    hf_dir.mkdir(parents=True, exist_ok=True)
-    ds_dict.save_to_disk(str(hf_dir))
+    tmp_dir = hf_dir.parent / "_hf_dataset_dla_tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    ds_dict.save_to_disk(str(tmp_dir))
+    if hf_dir.exists():
+        shutil.rmtree(hf_dir)
+    tmp_dir.rename(hf_dir)
 
     by_source = dict(Counter(r["source"] for r in rows))
     by_page_type = dict(Counter(r["page_type"] for r in rows))
@@ -297,6 +311,8 @@ def build_dla_bulk_dataset(
         "dpi": dpi,
         "pii_excluded_pages": pii_excluded,
         "other_excluded_pages": other_excluded,
+        "graphic_excluded_pages": graphic_excluded,
+        "graphic_rejection_reasons": dict(reason_counts),
         "scanned_share_pct": round(100.0 * scanned_count / max(total_pages, 1), 1),
         "digital_share_pct": round(100.0 * digital_count / max(total_pages, 1), 1),
         "by_source": by_source,
@@ -307,7 +323,8 @@ def build_dla_bulk_dataset(
 
     print(
         f"[build] Saved {total_pages:,} pages ({stats['total_documents']:,} PDFs, {dpi} DPI) "
-        f"to {hf_dir} (pii_excluded={pii_excluded}, other_excluded={other_excluded})"
+        f"to {hf_dir} (pii_excluded={pii_excluded}, other_excluded={other_excluded}, "
+        f"graphic_excluded={graphic_excluded}: {dict(reason_counts)})"
     )
     print(f"[build] By source: {by_source}")
     print(f"[build] By page_type: {by_page_type}")

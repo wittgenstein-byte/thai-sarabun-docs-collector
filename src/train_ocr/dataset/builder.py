@@ -21,6 +21,10 @@ from train_ocr.common.settings import (
     GOOGLE_PREPROCESSED_DIR,
     GROUPS,
     HF_DATASET_DIR,
+    INTERN_SODA_DIR,
+    INTERN_SODA_KRUT_HF_DIR,
+    INTERN_SODA_KRUT_PREPROCESSED_DIR,
+    INTERN_SODA_KRUT_RAW_DIR,
     MANIFEST_PATH,
     MAX_PAGES_PER_PDF,
     PAGE_INDEX_PATH,
@@ -82,14 +86,38 @@ def round_robin_select(
     return selected
 
 
+def _round_robin_group_order(candidates: list[dict]) -> list[dict]:
+    """Interleave candidates round-robin across all 15 groups without truncating."""
+    by_group: dict[str, list[dict]] = defaultdict(list)
+    for item in candidates:
+        by_group[item["group"]].append(item)
+
+    ordered: list[dict] = []
+    group_order = [g for g in GROUPS if by_group.get(g)]
+    pos = {g: 0 for g in group_order}
+    while group_order:
+        next_groups = []
+        for g in group_order:
+            items = by_group[g]
+            if pos[g] < len(items):
+                ordered.append(items[pos[g]])
+                pos[g] += 1
+                if pos[g] < len(items):
+                    next_groups.append(g)
+        group_order = next_groups
+    return ordered
+
+
 def build_general_dataset(
     target_total: int = TARGET_TOTAL_PAGES,
     scanned_ratio: float = SCANNED_RATIO,
     max_pages_per_pdf: int = MAX_PAGES_PER_PDF,
     dpi: int = RENDER_DPI,
 ) -> None:
-    """Build stratified general OCR benchmark dataset and save to data/hf_dataset."""
+    """Build stratified general OCR benchmark dataset (excluding posters/covers/slides) and save to data/hf_dataset."""
+    import shutil
     from datasets import Dataset, DatasetDict, Features, Image, Value
+    from train_ocr.screener.engine import OCRScreener
 
     if not MANIFEST_PATH.exists() or not PAGE_INDEX_PATH.exists():
         raise FileNotFoundError(
@@ -99,97 +127,132 @@ def build_general_dataset(
     manifest_map = {rec["resource_id"]: rec for rec in read_jsonl(MANIFEST_PATH)}
     indexed_pages = read_jsonl(PAGE_INDEX_PATH)
 
-    scanned_pool = [p for p in indexed_pages if p["page_type"] == "scanned"]
-    scanned_ocr_pool = [p for p in indexed_pages if p["page_type"] == "scanned_ocr"]
-    digital_pool = sorted(
-        (p for p in indexed_pages if p["page_type"] == "digital"),
-        key=lambda x: (x["layout_complexity_score"], x["path_count"], x["text_rect_count"]),
-        reverse=True,
+    scanned_pool = _round_robin_group_order([p for p in indexed_pages if p["page_type"] == "scanned"])
+    scanned_ocr_pool = _round_robin_group_order([p for p in indexed_pages if p["page_type"] == "scanned_ocr"])
+    digital_pool = _round_robin_group_order(
+        sorted(
+            (p for p in indexed_pages if p["page_type"] == "digital"),
+            key=lambda x: (x["layout_complexity_score"], x["path_count"], x["text_rect_count"]),
+            reverse=True,
+        )
     )
 
+    screener = OCRScreener()
     used_per_pdf: dict[str, int] = defaultdict(int)
+    seen_page_keys: set[tuple[str, int]] = set()
     target_scanned = round(target_total * scanned_ratio)
-
-    selected_scanned = round_robin_select(scanned_pool, target_scanned, max_pages_per_pdf, used_per_pdf)
-    if len(selected_scanned) < target_scanned:
-        rem = target_scanned - len(selected_scanned)
-        selected_scanned.extend(
-            round_robin_select(scanned_ocr_pool, rem, max_pages_per_pdf, used_per_pdf)
-        )
-
-    target_digital = round(len(selected_scanned) * (1.0 - scanned_ratio) / scanned_ratio)
-    selected_digital = round_robin_select(digital_pool, target_digital, max_pages_per_pdf, used_per_pdf)
-
-    selected_pages = selected_scanned + selected_digital
-    if not selected_pages:
-        raise RuntimeError("No pages selected for benchmark.")
-
-    pages_by_pdf: dict[str, list[dict]] = defaultdict(list)
-    for p in selected_pages:
-        pages_by_pdf[p["resource_id"]].append(p)
+    scale = dpi / 72.0
 
     PAGES_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
-    scale = dpi / 72.0
+    graphic_rejected = 0
+    reason_counts: Counter = Counter()
 
-    for res_id, page_metas in pages_by_pdf.items():
+    def try_screen_and_render(pm: dict) -> bool:
+        nonlocal graphic_rejected
+        res_id = pm["resource_id"]
+        if used_per_pdf[res_id] >= max_pages_per_pdf:
+            return False
+        key = (res_id, int(pm["page_index"]))
+        if key in seen_page_keys:
+            return False
         rec = manifest_map.get(res_id)
         if not rec:
-            continue
+            return False
         pdf_path = Path(rec["local_path"])
         if not pdf_path.exists():
-            continue
+            return False
 
+        seen_page_keys.add(key)
         doc = None
         try:
             doc = pdfium.PdfDocument(str(pdf_path))
-            for pm in sorted(page_metas, key=lambda x: x["page_index"]):
-                idx = pm["page_index"]
-                page = doc[idx]
-                try:
-                    bitmap = page.render(scale=scale)
-                    pil_img = bitmap.to_pil().convert("RGB")
-                    width, height = pil_img.size
-                finally:
-                    page.close()
-
-                out_dir = PAGES_DIR / rec["group"]
-                out_dir.mkdir(parents=True, exist_ok=True)
-                img_path = out_dir / f"{res_id}_p{pm['page_num']}.png"
-                pil_img.save(str(img_path), format="PNG")
-
-                rows.append(
-                    {
-                        "image": str(img_path),
-                        "doc_id": rec["doc_id"],
-                        "resource_id": res_id,
-                        "page_num": pm["page_num"],
-                        "total_pages": rec["total_pages"],
-                        "page_type": pm["page_type"],
-                        "image_coverage_ratio": float(pm["image_coverage_ratio"]),
-                        "layout_complexity_score": float(pm["layout_complexity_score"]),
-                        "path_count": int(pm["path_count"]),
-                        "text_rect_count": int(pm["text_rect_count"]),
-                        "has_embedded_text": pm["embedded_text_chars"] >= 20,
-                        "embedded_text_chars": int(pm["embedded_text_chars"]),
-                        "embedded_text_preview": pm["embedded_text_preview"],
-                        "group": rec["group"],
-                        "organization": rec["organization"],
-                        "title": rec["title"],
-                        "resource_name": rec["resource_name"],
-                        "license_id": rec["license_id"],
-                        "source_url": rec["source_url"],
-                        "metadata_modified": rec["metadata_modified"],
-                        "sha256": rec["sha256"],
-                        "width": width,
-                        "height": height,
-                    }
-                )
+            idx = pm["page_index"]
+            if idx >= len(doc):
+                return False
+            page = doc[idx]
+            try:
+                bitmap = page.render(scale=scale)
+                pil_img = bitmap.to_pil().convert("RGB")
+                width, height = pil_img.size
+            finally:
+                page.close()
         except Exception as exc:
-            print(f"Skipping {pdf_path.name} due to render error: {exc}")
+            print(f"Skipping {pdf_path.name} p{pm['page_num']} due to render error: {exc}")
+            return False
         finally:
             if doc is not None:
                 doc.close()
+
+        screen = screener.screen_pdf_page_graphic(
+            pil_img,
+            title=f"{rec.get('title', '')} {rec.get('resource_name', '')}",
+            embedded_chars=int(pm.get("embedded_text_chars", 0)),
+        )
+        if screen["status"] == "rejected":
+            graphic_rejected += 1
+            for r in screen["reasons"]:
+                reason_counts[r.split("(")[0]] += 1
+            return False
+
+        out_dir = PAGES_DIR / rec["group"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        img_path = out_dir / f"{res_id}_p{pm['page_num']}.png"
+        pil_img.save(str(img_path), format="PNG")
+
+        used_per_pdf[res_id] += 1
+        rows.append(
+            {
+                "image": str(img_path),
+                "doc_id": rec["doc_id"],
+                "resource_id": res_id,
+                "page_num": pm["page_num"],
+                "total_pages": rec["total_pages"],
+                "page_type": pm["page_type"],
+                "image_coverage_ratio": float(pm["image_coverage_ratio"]),
+                "layout_complexity_score": float(pm["layout_complexity_score"]),
+                "path_count": int(pm["path_count"]),
+                "text_rect_count": int(pm["text_rect_count"]),
+                "has_embedded_text": pm["embedded_text_chars"] >= 20,
+                "embedded_text_chars": int(pm["embedded_text_chars"]),
+                "embedded_text_preview": pm["embedded_text_preview"],
+                "group": rec["group"],
+                "organization": rec["organization"],
+                "title": rec["title"],
+                "resource_name": rec["resource_name"],
+                "license_id": rec["license_id"],
+                "source_url": rec["source_url"],
+                "metadata_modified": rec["metadata_modified"],
+                "sha256": rec["sha256"],
+                "width": width,
+                "height": height,
+            }
+        )
+        return True
+
+    picked_scanned = 0
+    for pm in scanned_pool:
+        if picked_scanned >= target_scanned:
+            break
+        if try_screen_and_render(pm):
+            picked_scanned += 1
+
+    for pm in scanned_ocr_pool:
+        if picked_scanned >= target_scanned:
+            break
+        if try_screen_and_render(pm):
+            picked_scanned += 1
+
+    target_digital = round(picked_scanned * (1.0 - scanned_ratio) / scanned_ratio) if picked_scanned else 0
+    picked_digital = 0
+    for pm in digital_pool:
+        if picked_digital >= target_digital:
+            break
+        if try_screen_and_render(pm):
+            picked_digital += 1
+
+    if not rows:
+        raise RuntimeError("No clean document pages remained after graphic filtering.")
 
     features = Features(
         {
@@ -221,7 +284,13 @@ def build_general_dataset(
 
     ds = Dataset.from_list(rows, features=features)
     ds_dict = DatasetDict({"test": ds})
-    ds_dict.save_to_disk(str(HF_DATASET_DIR))
+    tmp_dir = HF_DATASET_DIR.parent / "_hf_dataset_default_tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    ds_dict.save_to_disk(str(tmp_dir))
+    if HF_DATASET_DIR.exists():
+        shutil.rmtree(HF_DATASET_DIR)
+    tmp_dir.rename(HF_DATASET_DIR)
 
     type_counts = dict(Counter(r["page_type"] for r in rows))
     scanned_total = type_counts.get("scanned", 0) + type_counts.get("scanned_ocr", 0)
@@ -234,12 +303,17 @@ def build_general_dataset(
         "digital_share_pct": round(100.0 * type_counts.get("digital", 0) / len(rows), 2),
         "by_group": dict(Counter(r["group"] for r in rows)),
         "by_license": dict(Counter(r["license_id"] for r in rows)),
+        "graphic_rejected_pages": graphic_rejected,
+        "graphic_rejection_reasons": dict(reason_counts),
         "dpi": dpi,
     }
     (DATA_DIR / "dataset_stats.json").write_text(
         json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print(f"Built HF Dataset: {stats['total_pages']} pages from {stats['total_documents']} PDFs")
+    print(
+        f"Built HF Dataset: {stats['total_pages']} pages from {stats['total_documents']} PDFs "
+        f"(graphic_rejected={graphic_rejected}: {dict(reason_counts)})"
+    )
     print(
         f"page_type counts: {stats['by_page_type']} "
         f"(scanned={stats['scanned_share_pct']}%, digital={stats['digital_share_pct']}%)"
@@ -763,4 +837,123 @@ def main_google(argv: list[str] | None = None) -> None:
         hf_dir=args.hf_dir,
         max_edge=args.max_edge,
         screener_url=args.screener_url,
+    )
+
+
+def build_intern_soda_krut_dataset(
+    raw_dir: Path = INTERN_SODA_KRUT_RAW_DIR,
+    preprocessed_dir: Path = INTERN_SODA_KRUT_PREPROCESSED_DIR,
+    hf_dir: Path = INTERN_SODA_KRUT_HF_DIR,
+    max_edge: int = 3508,
+) -> dict[str, Any]:
+    """Preprocess Intern-SODA Garuda (has_krut) document images and save HF Dataset."""
+    import hashlib
+    import shutil
+    from datasets import Dataset, DatasetDict, Features, Image, Sequence, Value
+
+    if not raw_dir.exists():
+        raise FileNotFoundError(f"Intern-SODA has_krut directory not found: {raw_dir}")
+
+    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    raw_files = sorted(
+        p for p in raw_dir.rglob("*") if p.is_file() and p.suffix.lower() in image_exts
+    )
+    if not raw_files:
+        raise RuntimeError(f"No images found under {raw_dir}")
+
+    if preprocessed_dir.exists():
+        shutil.rmtree(preprocessed_dir)
+    preprocessed_dir.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    duplicates_skipped = 0
+
+    for src_path in raw_files:
+        rel = src_path.relative_to(raw_dir)
+        with PILImage.open(src_path) as raw_img:
+            pil_img = preprocess_document_image(raw_img, max_edge=max_edge)
+
+        out_path = (preprocessed_dir / rel).with_suffix(".png")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pil_img.save(str(out_path), format="PNG", optimize=True)
+        sha256 = hashlib.sha256(out_path.read_bytes()).hexdigest()
+
+        if sha256 in seen_hashes:
+            out_path.unlink(missing_ok=True)
+            duplicates_skipped += 1
+            continue
+        seen_hashes.add(sha256)
+
+        width, height = pil_img.size
+        rows.append(
+            {
+                "image": str(out_path),
+                "doc_id": sha256[:16],
+                "filename": src_path.name,
+                "source_credit": "Intern-SODA",
+                "has_krut": True,
+                "width": width,
+                "height": height,
+                "sha256": sha256,
+                "ground_truth_text": "",
+                "gt_status": "unverified",
+                "quality_tags": detect_quality_tags(pil_img),
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("No images processed for intern_soda_krut.")
+
+    features = Features(
+        {
+            "image": Image(),
+            "doc_id": Value("string"),
+            "filename": Value("string"),
+            "source_credit": Value("string"),
+            "has_krut": Value("bool"),
+            "width": Value("int32"),
+            "height": Value("int32"),
+            "sha256": Value("string"),
+            "ground_truth_text": Value("string"),
+            "gt_status": Value("string"),
+            "quality_tags": Sequence(Value("string")),
+        }
+    )
+
+    ds = Dataset.from_list(rows, features=features)
+    ds_dict = DatasetDict({"train": ds})
+    if hf_dir.exists():
+        shutil.rmtree(hf_dir)
+    ds_dict.save_to_disk(str(hf_dir))
+
+    stats = {
+        "config_name": "intern_soda_krut",
+        "split": "train",
+        "total_pages": len(rows),
+        "total_documents": len(rows),
+        "duplicates_skipped": duplicates_skipped,
+        "max_edge": max_edge,
+        "source_credit": "Intern-SODA",
+    }
+    stats_path = INTERN_SODA_DIR / "dataset_stats_krut.json"
+    stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Built Intern-SODA Krut HF Dataset: {stats['total_pages']} pages (dups skipped={duplicates_skipped}) -> {hf_dir}")
+    return stats
+
+
+def main_intern_soda_krut(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Preprocess Intern-SODA has_krut Garuda documents and build HF dataset."
+    )
+    parser.add_argument("--raw-dir", type=Path, default=INTERN_SODA_KRUT_RAW_DIR)
+    parser.add_argument("--preprocessed-dir", type=Path, default=INTERN_SODA_KRUT_PREPROCESSED_DIR)
+    parser.add_argument("--hf-dir", type=Path, default=INTERN_SODA_KRUT_HF_DIR)
+    parser.add_argument("--max-edge", type=int, default=3508)
+    args = parser.parse_args(argv)
+    build_intern_soda_krut_dataset(
+        raw_dir=args.raw_dir,
+        preprocessed_dir=args.preprocessed_dir,
+        hf_dir=args.hf_dir,
+        max_edge=args.max_edge,
     )
