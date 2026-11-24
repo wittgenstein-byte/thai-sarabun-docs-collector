@@ -17,6 +17,8 @@ from train_ocr.common.settings import (
     GOOGLE_HF_DIR,
     HF_DATASET_DIR,
     HF_REPO_ID,
+    INTERN_SODA_DIR,
+    INTERN_SODA_KRUT_HF_DIR,
     SARABAN_DIR,
     SARABAN_HF_DIR,
     load_hf_token,
@@ -91,6 +93,14 @@ def merge_hub_yaml(hub_yaml: str, repo_files: list[str]) -> str:
             "config_name": "dla_bulk",
             "data_files": [{"split": dla_bulk_split, "path": dla_bulk_path}],
         }
+    krut_path = "data/intern_soda_krut/train-*" if any(f.startswith("data/intern_soda_krut/") for f in repo_files) else "intern_soda_krut/train-*"
+    if "intern_soda_krut" not in existing_configs and any(
+        f.startswith(krut_path.split("*")[0]) for f in repo_files
+    ):
+        existing_configs["intern_soda_krut"] = {
+            "config_name": "intern_soda_krut",
+            "data_files": [{"split": "train", "path": krut_path}],
+        }
     if existing_configs:
         meta["configs"] = list(existing_configs.values())
 
@@ -104,6 +114,7 @@ def build_combined_readme(
     repo_files: list[str] | None = None,
     google_stats: dict | None = None,
     dla_bulk_stats: dict | None = None,
+    intern_soda_krut_stats: dict | None = None,
 ) -> str:
     """Build a Dataset Card covering all benchmark & training configs."""
     yaml_str = merge_hub_yaml(hub_yaml, repo_files or [])
@@ -116,6 +127,7 @@ def build_combined_readme(
         "- **`saraban_6types`**: Curated **6 official Thai Saraban correspondence types** (*ระเบียบสำนักนายกรัฐมนตรีว่าด้วยงานสารบรรณ*) from `dla.go.th` & `data.go.th` (300 DPI, PDPA-screened, with human-verified Golden Set Ground Truth).\n",
         "- **`google_docs`**: Web-crawled Thai government & local administration document images.\n",
         "- **`dla_bulk`**: High-coverage multi-portal collection from `www.dla.go.th` & `sll.dla.go.th` (official letters, local laws, articles, legal opinions, 200 DPI, PDPA-screened).\n",
+        "- **`intern_soda_krut`**: Thai government documents containing the official Garuda emblem (*ตราครุฑ*), contributed by **Intern-SODA** (`train_kruthdetect/DATA/has_krut`).\n",
     ]
 
     if saraban_stats:
@@ -208,6 +220,7 @@ def build_combined_readme(
 - **Total Pages (`test` split):** {default_stats['total_pages']:,} pages from {default_stats['total_documents']:,} PDFs ({default_stats['total_organizations']:,} agencies)
 - **Resolution:** {default_stats['dpi']} DPI (RGB PNG)
 - **Stratification:** {default_stats['scanned_share_pct']}% Scanned / {default_stats['digital_share_pct']}% Complex Digital
+- **Document-Only Filtering:** Excluded {default_stats.get('graphic_rejected_pages', 0):,} non-document graphic pages (posters, infographics, colorful covers, 16:9 slides).
 
 ### Page Type Breakdown
 | `page_type` | Pages |
@@ -260,7 +273,7 @@ def build_combined_readme(
 - **Total Pages (`{dla_bulk_stats.get('split', 'train')}` split):** {dla_bulk_stats['total_pages']:,} pages from {dla_bulk_stats['total_documents']:,} PDFs
 - **Resolution:** {dla_bulk_stats['dpi']} DPI (RGB PNG)
 - **Stratification:** {dla_bulk_stats['scanned_share_pct']}% Scanned (`scanned` + `scanned_ocr`) / {dla_bulk_stats['digital_share_pct']}% Digital
-- **PDPA Screening:** Excluded {dla_bulk_stats.get('pii_excluded_pages', 0):,} PII-flagged pages and {dla_bulk_stats.get('other_excluded_pages', 0):,} blank/other pages.
+- **PDPA & Graphic Screening:** Excluded {dla_bulk_stats.get('pii_excluded_pages', 0):,} PII-flagged pages, {dla_bulk_stats.get('other_excluded_pages', 0):,} blank/other pages, and {dla_bulk_stats.get('graphic_excluded_pages', 0):,} non-document graphic pages (posters, infographics, colorful covers, 16:9 slides).
 
 ### Breakdown by Portal (`source`)
 | `source` | Pages |
@@ -274,8 +287,22 @@ def build_combined_readme(
 """
         )
 
+    if intern_soda_krut_stats:
+        sections.append(
+            f"""## Config 5: `intern_soda_krut` (Garuda-Stamped Thai Official Documents)
+
+- **Total Images (`{intern_soda_krut_stats.get('split', 'train')}` split):** {intern_soda_krut_stats['total_pages']:,} images (EXIF-normalized RGB PNG, deduplicated, `has_krut=True`)
+- **Max Edge:** {intern_soda_krut_stats.get('max_edge', 3508)} px
+- **Source & Credit:** **Intern-SODA** (`train_kruthdetect/DATA/has_krut`) — Thai government documents featuring the official Garuda emblem (*ตราครุฑ*).
+"""
+        )
+
     sections.append(
-        """## Usage
+        """## Acknowledgments & Credits
+
+- **Intern-SODA**: Contributed the `intern_soda_krut` subset (Garuda-stamped Thai official document pages from `train_kruthdetect/DATA/has_krut`).
+
+## Usage
 
 ```python
 from datasets import load_dataset
@@ -313,6 +340,9 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
         elif config_name == "dla_bulk":
             ds_dir = DLA_BULK_HF_DIR
             stats_path = DLA_BULK_DIR / "dataset_stats.json"
+        elif config_name == "intern_soda_krut":
+            ds_dir = INTERN_SODA_KRUT_HF_DIR
+            stats_path = INTERN_SODA_DIR / "dataset_stats_krut.json"
         else:
             ds_dir = HF_DATASET_DIR
             stats_path = DATA_DIR / "dataset_stats.json"
@@ -347,6 +377,7 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
     saraban_stats_path = SARABAN_DIR / "dataset_stats.json"
     google_stats_path = GOOGLE_CRAWL_DIR / "dataset_stats.json"
     dla_bulk_stats_path = DLA_BULK_DIR / "dataset_stats.json"
+    intern_soda_krut_stats_path = INTERN_SODA_DIR / "dataset_stats_krut.json"
     default_stats = (
         json.loads(default_stats_path.read_text(encoding="utf-8"))
         if default_stats_path.exists()
@@ -367,6 +398,11 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
         if dla_bulk_stats_path.exists()
         else None
     )
+    intern_soda_krut_stats = (
+        json.loads(intern_soda_krut_stats_path.read_text(encoding="utf-8"))
+        if intern_soda_krut_stats_path.exists()
+        else None
+    )
 
     api = HfApi(token=hf_token)
     repo_files = api.list_repo_files(HF_REPO_ID, repo_type="dataset")
@@ -380,6 +416,7 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
             repo_files=repo_files,
             google_stats=google_stats,
             dla_bulk_stats=dla_bulk_stats,
+            intern_soda_krut_stats=intern_soda_krut_stats,
         ),
         encoding="utf-8",
     )
@@ -398,7 +435,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Push dataset config to Hugging Face Hub.")
     parser.add_argument(
         "--config-name",
-        choices=["default", "saraban_6types", "google_docs", "dla_bulk"],
+        choices=["default", "saraban_6types", "google_docs", "dla_bulk", "intern_soda_krut"],
         default="default",
     )
     parser.add_argument(

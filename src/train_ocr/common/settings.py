@@ -131,6 +131,12 @@ DLA_BULK_MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB per file
 DLA_BULK_MAX_TOTAL_BYTES = 1024 * 1024 * 1024  # 1 GB default total budget
 DLA_BULK_DEFAULT_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".gif", ".bmp")
 
+# Intern-SODA Garuda (has_krut) Dataset Configuration
+INTERN_SODA_DIR = DATA_DIR / "intern_soda_data"
+INTERN_SODA_KRUT_RAW_DIR = INTERN_SODA_DIR / "has_krut"
+INTERN_SODA_KRUT_PREPROCESSED_DIR = INTERN_SODA_DIR / "preprocessed_krut"
+INTERN_SODA_KRUT_HF_DIR = INTERN_SODA_DIR / "hf_dataset_krut"
+
 GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 IAPP_MARKDOWN_URL = "https://api.iapp.co.th/v3/store/ocr/document/markdown"
 KKU_BASE_URL = "https://gen.ai.kku.ac.th/api/v1"
