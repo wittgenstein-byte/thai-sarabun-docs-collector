@@ -73,21 +73,27 @@ def fetch_group_candidates(
     }
     if query:
         params["q"] = query
-    try:
-        resp = session.get(
-            f"{BASE_URL}/package_search",
-            headers={"api-key": api_key},
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("success"):
+    for attempt in range(2):
+        try:
+            resp = session.get(
+                f"{BASE_URL}/package_search",
+                headers={"api-key": api_key},
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("success"):
+                return []
+            return data["result"]["results"]
+        except requests.RequestException as exc:
+            if attempt == 0:
+                import time
+                time.sleep(2.0)
+                continue
+            print(f"  [warn] API query failed ({group}, start={start}): {exc}")
             return []
-        return data["result"]["results"]
-    except requests.RequestException as exc:
-        print(f"  [warn] API query failed ({group}, start={start}): {exc}")
-        return []
+    return []
 
 
 def download_and_validate_general_pdf(
@@ -125,7 +131,7 @@ def collect_general(
     session.headers.update({"User-Agent": "thai-govern-ocr-benchmark/1.0"})
 
     added_new = 0
-    start_offsets = (0, 120, 240, 360) if scanned_only else (0, 120)
+    start_offsets = (0, 120, 240, 360, 480, 600) if scanned_only else (0, 120)
 
     with MANIFEST_PATH.open("a", encoding="utf-8") as mf:
         for group in GROUPS:
