@@ -3,6 +3,7 @@
 import argparse
 import json
 import shutil
+import time
 from pathlib import Path
 
 from datasets import Dataset, DatasetDict, Value
@@ -18,7 +19,7 @@ from config import (
     SARABAN_HF_DIR,
     load_hf_token,
 )
-from train_ocr.common.settings import GOOGLE_CRAWL_DIR, GOOGLE_HF_DIR, RAJAKITCHA_DIR, RAJAKITCHA_HF_DIR
+from train_ocr.common.settings import DLA_BULK_DIR, DLA_BULK_HF_DIR, GOOGLE_CRAWL_DIR, GOOGLE_HF_DIR, INTERN_SODA_DIR, INTERN_SODA_KRUT_HF_DIR, RAJAKITCHA_DIR, RAJAKITCHA_HF_DIR
 
 
 def export_groundtruth_backup() -> Path:
@@ -77,13 +78,22 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
         hf_dir = RAJAKITCHA_HF_DIR
         ann_path = RAJAKITCHA_DIR / "gt" / "gt_annotations.jsonl"
         config_name = "rajakitcha"
+    elif dataset_name == "intern_soda_krut":
+        hf_dir = INTERN_SODA_KRUT_HF_DIR
+        ann_path = INTERN_SODA_DIR / "gt_krut" / "gt_annotations.jsonl"
+        config_name = "intern_soda_krut"
+    elif dataset_name == "dla_bulk":
+        hf_dir = DLA_BULK_HF_DIR
+        ann_path = DLA_BULK_DIR / "gt" / "gt_annotations.jsonl"
+        config_name = "dla_bulk"
     else:
         hf_dir = SARABAN_HF_DIR
         ann_path = GT_ANNOTATIONS_PATH
         config_name = "saraban_6types"
     is_saraban = dataset_name == "saraban"
-    use_doc_id = dataset_name in {"google_docs", "rajakitcha"}
-    split_name = "train" if dataset_name == "rajakitcha" else "test"
+    use_doc_id = dataset_name in {"google_docs", "rajakitcha", "intern_soda_krut"}
+    use_doc_page_id = dataset_name == "dla_bulk"
+    split_name = "train" if dataset_name in {"rajakitcha", "intern_soda_krut", "dla_bulk"} else "test"
 
     if not hf_dir.exists():
         raise FileNotFoundError(f"HF dataset not found: {hf_dir}")
@@ -108,7 +118,13 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
 
     for i in range(len(ds)):
         row = dict(ds[i])
-        sid = row["doc_id"] if use_doc_id else f"{row['resource_id']}_p{row['page_num']}"
+        sid = (
+            row["doc_id"]
+            if use_doc_id
+            else f"{row['doc_id']}_p{row['page_num']}"
+            if use_doc_page_id
+            else f"{row['resource_id']}_p{row['page_num']}"
+        )
         if is_saraban:
             row["is_golden_set"] = sid in golden_ids
         ann = annotations.get(sid)
@@ -145,8 +161,18 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
     new_dict.save_to_disk(str(tmp_dir))
-    shutil.rmtree(hf_dir)
-    tmp_dir.rename(hf_dir)
+    if hf_dir.exists():
+        shutil.rmtree(hf_dir)
+    for attempt in range(5):
+        try:
+            tmp_dir.rename(hf_dir)
+            break
+        except PermissionError:
+            if attempt == 4:
+                shutil.copytree(tmp_dir, hf_dir)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            else:
+                time.sleep(0.5)
 
     total = len(golden_ids) if is_saraban else len(ds)
     print(f"Synced GT into {hf_dir}: {verified_count} human_verified / {total} pages")
@@ -174,7 +200,7 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync gt_annotations.jsonl into HF dataset.")
-    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default", "rajakitcha"], default="saraban")
+    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default", "rajakitcha", "intern_soda_krut", "dla_bulk"], default="saraban")
     parser.add_argument("--push", action="store_true", help="Also push updated dataset to Hugging Face Hub.")
     args = parser.parse_args()
     sync_gt(dataset_name=args.dataset, push=args.push)

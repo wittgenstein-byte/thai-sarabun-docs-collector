@@ -9,11 +9,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from config import DATA_DIR, GOLDEN_DRAFTS_PATH, GOLDEN_MANIFEST_PATH, GT_ANNOTATIONS_PATH
-from train_ocr.common.settings import GOOGLE_CRAWL_DIR, RAJAKITCHA_DIR
+from train_ocr.common.settings import DLA_BULK_DIR, GOOGLE_CRAWL_DIR, INTERN_SODA_DIR, RAJAKITCHA_DIR
 
 GOOGLE_GT_DIR = GOOGLE_CRAWL_DIR / "gt"
 DEFAULT_GT_DIR = DATA_DIR / "default_gt"
 RAJAKITCHA_GT_DIR = RAJAKITCHA_DIR / "gt"
+INTERN_SODA_GT_DIR = INTERN_SODA_DIR / "gt_krut"
+DLA_BULK_GT_DIR = DLA_BULK_DIR / "gt"
 _ACTIVE_DATASET = "saraban"
 
 
@@ -35,6 +37,18 @@ def _get_paths() -> tuple[Path, Path, Path]:
             RAJAKITCHA_GT_DIR / "rajakitcha_manifest.jsonl",
             RAJAKITCHA_GT_DIR / "dual_drafts.jsonl",
             RAJAKITCHA_GT_DIR / "gt_annotations.jsonl",
+        )
+    if _ACTIVE_DATASET == "intern_soda_krut":
+        return (
+            INTERN_SODA_GT_DIR / "intern_soda_krut_manifest.jsonl",
+            INTERN_SODA_GT_DIR / "dual_drafts.jsonl",
+            INTERN_SODA_GT_DIR / "gt_annotations.jsonl",
+        )
+    if _ACTIVE_DATASET == "dla_bulk":
+        return (
+            DLA_BULK_GT_DIR / "dla_bulk_manifest.jsonl",
+            DLA_BULK_GT_DIR / "dual_drafts.jsonl",
+            DLA_BULK_GT_DIR / "gt_annotations.jsonl",
         )
     return GOLDEN_MANIFEST_PATH, GOLDEN_DRAFTS_PATH, GT_ANNOTATIONS_PATH
 
@@ -511,7 +525,7 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Launch Human-in-the-Loop GT Review UI.")
-    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default", "rajakitcha"], default="saraban")
+    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default", "rajakitcha", "intern_soda_krut", "dla_bulk"], default="saraban")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
