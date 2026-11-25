@@ -1,0 +1,235 @@
+"""Draft Ground Truth for Config 5 (intern_soda_krut, 120-image subset) using KKU GenAI VLMs."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import requests
+
+from config import (
+    KKU_BASE_URL,
+    KKU_MODEL_A,
+    KKU_MODEL_B,
+    load_kku_api_key,
+)
+from draft_gt_dual import call_vlm_openai_compat, compute_agreement
+from train_ocr.common.settings import (
+    INTERN_SODA_DIR,
+    INTERN_SODA_KRUT_HF_DIR,
+    INTERN_SODA_KRUT_PREPROCESSED_DIR,
+)
+
+INTERN_SODA_GT_DIR = INTERN_SODA_DIR / "gt_krut"
+INTERN_SODA_GT_MANIFEST_PATH = INTERN_SODA_GT_DIR / "intern_soda_krut_manifest.jsonl"
+INTERN_SODA_GT_DRAFTS_PATH = INTERN_SODA_GT_DIR / "dual_drafts.jsonl"
+INTERN_SODA_GT_ANNOTATIONS_PATH = INTERN_SODA_GT_DIR / "gt_annotations.jsonl"
+
+
+def build_intern_soda_krut_manifest(
+    hf_dir: Path = INTERN_SODA_KRUT_HF_DIR,
+    preprocessed_dir: Path = INTERN_SODA_KRUT_PREPROCESSED_DIR,
+    manifest_path: Path = INTERN_SODA_GT_MANIFEST_PATH,
+    target: int = 120,
+) -> list[dict]:
+    """Generate stratified/diverse 120-image manifest from intern_soda_krut HF dataset."""
+    from datasets import DatasetDict
+
+    if not hf_dir.exists():
+        raise FileNotFoundError(f"Intern-SODA Krut HF dataset not found: {hf_dir}")
+
+    ds = DatasetDict.load_from_disk(str(hf_dir))["train"]
+    all_records: list[dict] = []
+    for i in range(len(ds)):
+        row = ds[i]
+        img_path = (preprocessed_dir / row["filename"]).with_suffix(".png")
+        if not img_path.exists():
+            raise FileNotFoundError(f"Preprocessed image missing: {img_path}")
+        all_records.append(
+            {
+                "sample_id": row["doc_id"],
+                "doc_id": row["doc_id"],
+                "filename": row["filename"],
+                "image_path": str(img_path.as_posix()),
+                "saraban_type": "has_krut",
+                "page_type": "scanned",
+                "page_role": "Intern-SODA",
+                "organization": row["filename"],
+                "page_num": 1,
+                "total_pages": 1,
+                "width": int(row["width"]),
+                "height": int(row["height"]),
+                "quality_tags": list(row.get("quality_tags") or []),
+            }
+        )
+
+    all_records.sort(key=lambda r: r["filename"])
+    if target > 0 and target < len(all_records):
+        # Evenly-spaced sampling across sorted filenames for diverse document prefixes/eras
+        step = len(all_records) / target
+        records = [all_records[int(i * step)] for i in range(target)]
+    else:
+        records = all_records
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return records
+
+
+def run_intern_soda_krut_drafting(
+    base_url: str = KKU_BASE_URL,
+    model_a: str = KKU_MODEL_A,
+    model_b: str = KKU_MODEL_B,
+    fallback_model: str = "qwen3.8-27b",
+    only: str = "both",
+    target: int = 120,
+    limit: int = 0,
+    delay: float = 0.1,
+    workers: int = 6,
+) -> None:
+    """Build manifest and generate dual-model KKU VLM drafts for intern_soda_krut."""
+    api_key = load_kku_api_key()
+    manifest = build_intern_soda_krut_manifest(target=target)
+    if limit > 0:
+        manifest = manifest[:limit]
+
+    existing: dict[str, dict] = {}
+    if INTERN_SODA_GT_DRAFTS_PATH.exists():
+        for line in INTERN_SODA_GT_DRAFTS_PATH.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rec = json.loads(line)
+                existing[rec["sample_id"]] = rec
+
+    todo = [
+        item
+        for item in manifest
+        if (only in {"both", "a"} and not existing.get(item["sample_id"], {}).get("model_a_markdown"))
+        or (only in {"both", "b"} and not existing.get(item["sample_id"], {}).get("model_b_markdown"))
+    ]
+    print(
+        f"Pending intern_soda_krut samples: {len(todo)}/{len(manifest)} "
+        f"(workers={workers}, models={model_a} + {model_b}, fallback={fallback_model}, only={only})",
+        flush=True,
+    )
+    if not todo:
+        return
+
+    lock = threading.Lock()
+    processed = 0
+
+    def process_one(item: dict) -> None:
+        nonlocal processed
+        sid = item["sample_id"]
+        img_path = Path(item["image_path"])
+
+        with lock:
+            rec = dict(
+                existing.get(
+                    sid,
+                    {
+                        "sample_id": sid,
+                        "model_a_name": model_a,
+                        "model_a_markdown": "",
+                        "model_a_kie": {},
+                        "model_b_name": model_b,
+                        "model_b_markdown": "",
+                        "model_b_kie": {},
+                        "agreement_score": 0.0,
+                    },
+                )
+            )
+
+        session = requests.Session()
+        changed = False
+
+        if only in {"both", "a"} and not rec.get("model_a_markdown"):
+            try:
+                md, kie = call_vlm_openai_compat(session, base_url, api_key, model_a, img_path)
+                rec["model_a_name"] = model_a
+                rec["model_a_markdown"] = md
+                rec["model_a_kie"] = kie
+                changed = True
+            except Exception as exc:
+                print(f"  [warn] {model_a} failed for {sid} ({exc}); trying {fallback_model}", flush=True)
+                try:
+                    md, kie = call_vlm_openai_compat(session, base_url, api_key, fallback_model, img_path)
+                    rec["model_a_name"] = fallback_model
+                    rec["model_a_markdown"] = md
+                    rec["model_a_kie"] = kie
+                    changed = True
+                except Exception as exc2:
+                    print(f"  [err] {fallback_model} failed for {sid}: {exc2}", flush=True)
+
+        if only in {"both", "b"} and not rec.get("model_b_markdown"):
+            try:
+                md, kie = call_vlm_openai_compat(session, base_url, api_key, model_b, img_path)
+                rec["model_b_name"] = model_b
+                rec["model_b_markdown"] = md
+                rec["model_b_kie"] = kie
+                changed = True
+            except Exception as exc:
+                print(f"  [err] {model_b} failed for {sid}: {exc}", flush=True)
+
+        if changed:
+            rec["agreement_score"] = compute_agreement(
+                rec.get("model_a_markdown", ""), rec.get("model_b_markdown", "")
+            )
+            with lock:
+                existing[sid] = rec
+                INTERN_SODA_GT_DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with INTERN_SODA_GT_DRAFTS_PATH.open("w", encoding="utf-8") as f:
+                    for r in existing.values():
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                processed += 1
+                print(
+                    f"[{processed}/{len(todo)}] {sid} ({item['filename']}) "
+                    f"agreement={rec['agreement_score']:.3f}",
+                    flush=True,
+                )
+            if delay > 0:
+                time.sleep(delay)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(process_one, item) for item in todo]
+        for fut in as_completed(futures):
+            fut.result()
+
+    print(
+        f"\nDone: {len(existing)}/{len(manifest)} intern_soda_krut drafts stored in {INTERN_SODA_GT_DRAFTS_PATH}",
+        flush=True,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Draft GT for intern_soda_krut via KKU GenAI VLMs.")
+    parser.add_argument("--base-url", type=str, default=KKU_BASE_URL)
+    parser.add_argument("--model-a", type=str, default=KKU_MODEL_A)
+    parser.add_argument("--model-b", type=str, default=KKU_MODEL_B)
+    parser.add_argument("--fallback-model", type=str, default="qwen3.8-27b")
+    parser.add_argument("--only", choices=["both", "a", "b"], default="both")
+    parser.add_argument("--target", type=int, default=120, help="Diverse subset size (0 = all 446).")
+    parser.add_argument("--limit", type=int, default=0, help="Process at most N images (0 = all).")
+    parser.add_argument("--delay", type=float, default=0.1)
+    parser.add_argument("--workers", type=int, default=6)
+    args = parser.parse_args()
+    run_intern_soda_krut_drafting(
+        base_url=args.base_url,
+        model_a=args.model_a,
+        model_b=args.model_b,
+        fallback_model=args.fallback_model,
+        only=args.only,
+        target=args.target,
+        limit=args.limit,
+        delay=args.delay,
+        workers=args.workers,
+    )
+
+
+if __name__ == "__main__":
+    main()
