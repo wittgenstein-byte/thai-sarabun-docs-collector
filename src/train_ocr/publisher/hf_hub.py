@@ -138,7 +138,7 @@ def build_combined_readme(
         "- **`saraban_6types`**: Curated **6 official Thai Saraban correspondence types** (*ระเบียบสำนักนายกรัฐมนตรีว่าด้วยงานสารบรรณ*) from `dla.go.th` & `data.go.th` (300 DPI, PDPA-screened, with human-verified Golden Set Ground Truth).\n",
         "- **`google_docs`**: Web-crawled Thai government & local administration document images (108 images, **96 `human_verified`** GT).\n",
         "- **`dla_bulk`**: High-coverage multi-portal collection from `www.dla.go.th` & `sll.dla.go.th` (official letters, local laws, articles, legal opinions, 200 DPI, PDPA-screened).\n",
-        "- **`intern_soda_krut`**: Thai government documents containing the official Garuda emblem (*ตราครุฑ*), contributed by **Intern-SODA** (`train_kruthdetect/DATA/has_krut`).\n",
+        "- **`intern_soda_krut`**: Thai government documents containing the official Garuda emblem (*ตราครุฑ*), contributed by **Intern-SODA** (`train_kruthdetect/DATA/has_krut`, 446 images, **120 `human_verified`** GT).\n",
         "- **`rajakitcha`**: Royal Gazette (*ราชกิจจานุเบกษา*) constituency announcement pages from `KittapatR/Thai-OCR-open-source-initiative` (87 images, **20 `human_verified`** GT).\n",
     ]
 
@@ -171,12 +171,28 @@ def build_combined_readme(
         rajakitcha_hv = sum(1 for a in r_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
         rajakitcha_fl = sum(1 for a in r_anns if a.get("gt_status") == "flagged")
 
-    total_hv = saraban_hv + google_hv + default_hv + rajakitcha_hv
+    krut_hv, krut_fl = 0, 0
+    krut_ann_path = INTERN_SODA_DIR / "gt_krut" / "gt_annotations.jsonl"
+    if krut_ann_path.exists():
+        k_anns = [json.loads(l) for l in krut_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        krut_hv = sum(1 for a in k_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+        krut_fl = sum(1 for a in k_anns if a.get("gt_status") == "flagged")
+
+    dla_hv, dla_fl = 0, 0
+    dla_ann_path = DLA_BULK_DIR / "gt" / "gt_annotations.jsonl"
+    if dla_ann_path.exists():
+        dla_anns = [json.loads(l) for l in dla_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        dla_hv = sum(1 for a in dla_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+        dla_fl = sum(1 for a in dla_anns if a.get("gt_status") == "flagged")
+
+    total_hv = saraban_hv + google_hv + default_hv + rajakitcha_hv + krut_hv + dla_hv
     if total_hv > 0:
         s_total = saraban_stats["total_pages"] if saraban_stats else 419
         g_total = google_stats["total_pages"] if google_stats else 108
         d_total = default_stats["total_pages"] if default_stats else 319
         r_total = rajakitcha_stats["total_pages"] if rajakitcha_stats else 87
+        k_total = intern_soda_krut_stats["total_pages"] if intern_soda_krut_stats else 446
+        dla_total = dla_bulk_stats["total_pages"] if dla_bulk_stats else 1649
         sections.append(
             f"""## Human-Verified Ground Truth Summary
 
@@ -187,8 +203,8 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
 | `saraban_6types` | `test` | {s_total:,} | **{saraban_hv:,}** | {saraban_fl:,} | {max(0, s_total - saraban_hv - saraban_fl):,} | Golden Set (`is_golden_set == True`) dual-drafted + human-verified via Review UI |
 | `default` | `test` | {d_total:,} | **{default_hv:,}** | {default_fl:,} | {max(0, d_total - default_hv - default_fl):,} | Stratified 120-page subset dual-drafted via KKU VLMs + human-verified via Review UI |
 | `google_docs` | `test` | {g_total:,} | **{google_hv:,}** | {google_fl:,} | {max(0, g_total - google_hv - google_fl):,} | Drafted with **iApp OpenThai OCR 2.1** + human-verified via Review UI |
-| `dla_bulk` | `train` | {dla_bulk_stats['total_pages'] if dla_bulk_stats else 1649:,} | 0 | 0 | {dla_bulk_stats['total_pages'] if dla_bulk_stats else 1649:,} | Pre-training / layout corpus (with `embedded_text_preview`) |
-| `intern_soda_krut` | `train` | {intern_soda_krut_stats['total_pages'] if intern_soda_krut_stats else 446:,} | 0 | 0 | {intern_soda_krut_stats['total_pages'] if intern_soda_krut_stats else 446:,} | Garuda-stamped corpus (`has_krut == True`, credit: Intern-SODA) |
+| `dla_bulk` | `train` | {dla_total:,} | **{dla_hv:,}** | {dla_fl:,} | {max(0, dla_total - dla_hv - dla_fl):,} | Stratified 120-page subset drafted with KKU VLMs & **iApp OpenThai OCR 2.1** + human-verified |
+| `intern_soda_krut` | `train` | {k_total:,} | **{krut_hv:,}** | {krut_fl:,} | {max(0, k_total - krut_hv - krut_fl):,} | Garuda-stamped 120-image subset dual-drafted via KKU VLMs + human-verified (credit: Intern-SODA) |
 | `rajakitcha` | `train` | {r_total:,} | **{rajakitcha_hv:,}** | {rajakitcha_fl:,} | {max(0, r_total - rajakitcha_hv - rajakitcha_fl):,} | Royal Gazette (*ราชกิจจานุเบกษา*) drafted with **iApp OpenThai OCR 2.1** + human-verified via Review UI |
 
 > **Tip:** Filter verified Ground Truth rows directly with `ds.filter(lambda x: x["gt_status"] == "human_verified")`. Exclude `gt_status == "flagged"` (illegible/corrupted/unsuitable pages) during OCR accuracy evaluation.
@@ -348,6 +364,14 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
                 dla_bulk_stats["by_page_type"].items(), key=lambda x: x[1], reverse=True
             )
         )
+        dla_gt_block = ""
+        if dla_ann_path.exists():
+            dla_gt_block = f"""
+### Human-Verified Ground Truth
+- **Verified GT Pages (`gt_status == "human_verified"`):** {dla_hv:,} / {dla_bulk_stats['total_pages']:,} pages (`flagged`: {dla_fl:,})
+- **Draft Engine & Verification:** Stratified 120-page subset drafted via KKU VLMs and **iApp OpenThai OCR 2.1**, then human-verified via Review UI.
+- **GT Columns:** Full-page Markdown in `ground_truth_text`, KIE Header JSON (`doc_no`, `doc_date`, `subject`) in `gt_kie_json`, and `quality_tags`.
+"""
         sections.append(
             f"""## Config 4: `dla_bulk` (DLA Multi-Portal Corpus from `dla.go.th` & `sll.dla.go.th`)
 
@@ -355,7 +379,7 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
 - **Resolution:** {dla_bulk_stats['dpi']} DPI (RGB PNG)
 - **Stratification:** {dla_bulk_stats['scanned_share_pct']}% Scanned (`scanned` + `scanned_ocr`) / {dla_bulk_stats['digital_share_pct']}% Digital
 - **PDPA & Graphic Screening:** Excluded {dla_bulk_stats.get('pii_excluded_pages', 0):,} PII-flagged pages, {dla_bulk_stats.get('other_excluded_pages', 0):,} blank/other pages, and {dla_bulk_stats.get('graphic_excluded_pages', 0):,} non-document graphic pages (posters, infographics, colorful covers, 16:9 slides).
-
+{dla_gt_block}
 ### Breakdown by Portal (`source`)
 | `source` | Pages |
 |---|---:|
@@ -369,13 +393,21 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
         )
 
     if intern_soda_krut_stats:
+        krut_gt_block = ""
+        if krut_ann_path.exists():
+            krut_gt_block = f"""
+### Human-Verified Ground Truth
+- **Verified GT Images (`gt_status == "human_verified"`):** {krut_hv:,} / {intern_soda_krut_stats['total_pages']:,} images (`flagged`: {krut_fl:,})
+- **Draft Engine & Verification:** 120-image diverse subset dual-drafted via KKU VLMs (`gemini-4-hydrogen` + `gemma4-26b`), then human-verified via Review UI.
+- **GT Columns:** Full-page Markdown in `ground_truth_text`, KIE Header JSON (`doc_no`, `doc_date`, `subject`) in `gt_kie_json`, and `quality_tags`.
+"""
         sections.append(
             f"""## Config 5: `intern_soda_krut` (Garuda-Stamped Thai Official Documents)
 
 - **Total Images (`{intern_soda_krut_stats.get('split', 'train')}` split):** {intern_soda_krut_stats['total_pages']:,} images (EXIF-normalized RGB PNG, deduplicated, `has_krut=True`)
 - **Max Edge:** {intern_soda_krut_stats.get('max_edge', 3508)} px
 - **Source & Credit:** **Intern-SODA** (`train_kruthdetect/DATA/has_krut`) — Thai government documents featuring the official Garuda emblem (*ตราครุฑ*).
-"""
+{krut_gt_block}"""
         )
 
     if rajakitcha_stats:
