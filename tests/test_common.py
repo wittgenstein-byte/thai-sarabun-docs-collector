@@ -122,3 +122,25 @@ def test_manifest_roundtrip_and_blocked_domains(tmp_path: Path) -> None:
     assert is_blocked_domain("https://i.pinimg.com/originals/abc.jpg")
     assert is_blocked_domain("https://www.tiktok.com/@user/video/1")
     assert not is_blocked_domain("https://www.kkzone1.go.th/doc.jpg")
+
+
+def test_download_links_with_offset_preserves_existing_files(tmp_path: Path) -> None:
+    import base64
+    from io import BytesIO
+    from train_ocr.collectors.google_images import _download_links_with_offset
+
+    kw = "คำสั่ง อบต"
+    kw_dir = tmp_path / kw
+    kw_dir.mkdir(parents=True)
+    existing = kw_dir / "google_0000.png"
+    existing.write_bytes(b"existing-file")
+
+    buf = BytesIO()
+    Image.new("RGB", (32, 32), (240, 240, 240)).save(buf, format="PNG")
+    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+    count = _download_links_with_offset(kw, [data_uri, data_uri], tmp_path, start_index=40, max_count=60)
+    assert count == 2
+    assert existing.read_bytes() == b"existing-file"
+    assert (kw_dir / "google_0040.png").exists()
+    assert (kw_dir / "google_0041.png").exists()

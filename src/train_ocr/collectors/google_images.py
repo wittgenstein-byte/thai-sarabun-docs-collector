@@ -77,6 +77,7 @@ def collect_google_full_resilient(
     config: Any,
     blocked_domains: tuple[str, ...] = GOOGLE_BLOCKED_DOMAINS,
     fail_on_captcha: bool = False,
+    offset: int = 0,
 ) -> list[str]:
     """Full-resolution Google Images collector using direct Next-button click with Keys.RIGHT fallback."""
     from selenium.common.exceptions import StaleElementReferenceException
@@ -123,8 +124,50 @@ def collect_google_full_resilient(
         )
         time.sleep(1)
 
+        if offset > 0:
+            logger.info("Fast-skipping first %d results...", offset)
+            next_button_xpath = '//button[@jsname="OCpkoe"]'
+            for _ in range(offset):
+                if is_captcha_page(driver):
+                    if fail_on_captcha:
+                        raise CaptchaBlockedError(
+                            f"CAPTCHA detected while skipping at {driver.current_url}",
+                            partial_links=[],
+                        )
+                    wait_for_manual_captcha(driver, config.no_gui)
+
+                next_buttons = []
+                try:
+                    next_buttons = driver.find_elements(By.XPATH, next_button_xpath)
+                    disabled = bool(next_buttons) and (
+                        next_buttons[0].get_attribute("disabled") is not None
+                        or next_buttons[0].get_attribute("aria-disabled") == "true"
+                    )
+                except StaleElementReferenceException:
+                    disabled = False
+
+                if disabled:
+                    logger.info("Reached end of results while skipping at %d", offset)
+                    return []
+
+                advanced = False
+                try:
+                    if next_buttons:
+                        next_buttons[0].click()
+                        advanced = True
+                except Exception:
+                    advanced = False
+                if not advanced:
+                    ActionChains(driver).send_keys(Keys.RIGHT).perform()
+                time.sleep(0.2)
+
         body = driver.find_element(By.TAG_NAME, "body")
-        limit = config.limit or 10000
+        if config.limit > 0:
+            limit = max(0, config.limit - offset)
+            if limit == 0:
+                return []
+        else:
+            limit = 10000
         last_scroll = 0
         patience = 0
         max_patience = 30
@@ -212,6 +255,75 @@ def collect_google_full_resilient(
         driver.quit()
 
 
+def _download_links_with_offset(
+    keyword: str,
+    links: list[str],
+    download_path: Path,
+    start_index: int = 0,
+    max_count: int = 0,
+) -> int:
+    """Download image links starting filenames at `google_{start_index:04d}` without overwriting."""
+    import requests
+    from autocrawler.downloader import base64_to_object, get_extension_from_link, validate_image
+
+    keyword_dir = download_path / keyword.replace('"', "")
+    keyword_dir.mkdir(parents=True, exist_ok=True)
+
+    target = max_count or len(links)
+    success_count = 0
+
+    for offset_idx, link in enumerate(links):
+        if success_count >= target:
+            break
+
+        file_idx = start_index + offset_idx
+        no_ext_path = keyword_dir / f"google_{file_idx:04d}"
+        path: Path | None = None
+
+        try:
+            logger.info(
+                "Downloading %s from google: %d / %d (idx=%04d)",
+                keyword,
+                success_count + 1,
+                target,
+                file_idx,
+            )
+            if link.startswith("data:image/jpeg;base64"):
+                path = no_ext_path.with_suffix(".jpg")
+                path.write_bytes(base64_to_object(link))
+                ext = "jpg"
+            elif link.startswith("data:image/png;base64"):
+                path = no_ext_path.with_suffix(".png")
+                path.write_bytes(base64_to_object(link))
+                ext = "png"
+            else:
+                ext = get_extension_from_link(link)
+                path = no_ext_path.with_suffix(f".{ext}")
+                response = requests.get(link, stream=True, timeout=10)
+                with path.open("wb") as file:
+                    shutil.copyfileobj(response.raw, file)
+                del response
+
+            real_ext = validate_image(path)
+            if real_ext is None:
+                logger.warning("Unreadable file - %s", link)
+                path.unlink(missing_ok=True)
+                continue
+            if real_ext != ext:
+                renamed = path.with_suffix(f".{real_ext}")
+                path.rename(renamed)
+            success_count += 1
+        except KeyboardInterrupt:
+            break
+        except Exception as exc:
+            if path is not None:
+                path.unlink(missing_ok=True)
+            logger.warning("Download failed - %s", exc)
+            continue
+
+    return success_count
+
+
 def _build_task_profile(base_profile: Path, temp_root: Path) -> Path:
     task_dir = temp_root / "chrome-profile"
     if base_profile.exists():
@@ -229,6 +341,7 @@ def crawl_google_images(
     full_resolution: bool = True,
     no_gui: bool = False,
     limit: int = 20,
+    offset: int = 0,
     proxy_list: list[str] | None = None,
     blocked_domains: tuple[str, ...] = GOOGLE_BLOCKED_DOMAINS,
     skip_warmup: bool = False,
@@ -272,12 +385,14 @@ def crawl_google_images(
         warm_up_chrome_profile(base_config)
 
     keywords = get_keywords(resolved_keywords)
+    done_marker_name = "google_done" if offset == 0 else f"google_done_{offset}_{limit}"
+    max_download_count = (max(0, limit - offset) if limit > 0 else 0) if offset > 0 else limit
     try:
         for idx, keyword in enumerate(keywords):
             keyword_dir = resolved_download / keyword.replace('"', "")
-            done_marker = keyword_dir / "google_done"
+            done_marker = keyword_dir / done_marker_name
             if skip_existing and done_marker.exists():
-                logger.info("Skipping completed keyword: %s", keyword)
+                logger.info("Skipping completed keyword (%s): %s", done_marker_name, keyword)
                 continue
 
             if idx > 0 and keyword_delay > 0:
@@ -295,15 +410,26 @@ def crawl_google_images(
                             task_config,
                             blocked_domains=blocked_domains,
                             fail_on_captcha=fail_on_captcha,
+                            offset=offset,
                         )
                     else:
-                        links = [
+                        raw_links = [
                             link
                             for link in collect_google(keyword, task_config)
                             if not is_blocked_domain(link, blocked_domains)
                         ]
+                        links = raw_links[offset:limit] if (offset > 0 and limit > 0) else raw_links[offset:]
 
-                download_images(keyword, links, Site.GOOGLE, resolved_download, max_count=limit)
+                if offset > 0:
+                    _download_links_with_offset(
+                        keyword,
+                        links,
+                        resolved_download,
+                        start_index=offset,
+                        max_count=max_download_count,
+                    )
+                else:
+                    download_images(keyword, links, Site.GOOGLE, resolved_download, max_count=limit)
                 keyword_dir.mkdir(parents=True, exist_ok=True)
                 done_marker.touch()
             except CaptchaBlockedError as exc:
@@ -313,13 +439,22 @@ def crawl_google_images(
                         len(exc.partial_links),
                         keyword,
                     )
-                    download_images(
-                        keyword,
-                        exc.partial_links,
-                        Site.GOOGLE,
-                        resolved_download,
-                        max_count=limit,
-                    )
+                    if offset > 0:
+                        _download_links_with_offset(
+                            keyword,
+                            exc.partial_links,
+                            resolved_download,
+                            start_index=offset,
+                            max_count=max_download_count,
+                        )
+                    else:
+                        download_images(
+                            keyword,
+                            exc.partial_links,
+                            Site.GOOGLE,
+                            resolved_download,
+                            max_count=limit,
+                        )
                 logger.error(
                     "CAPTCHA_BLOCKED: stopping remaining keywords cleanly (collected partial progress): %s",
                     exc,
@@ -361,6 +496,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--full", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--no-gui", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Start index to skip already-collected results (e.g. --offset 40 --limit 100 collects 40..99).",
+    )
     parser.add_argument("--proxy-list", type=str, default="")
     parser.add_argument("--skip-warmup", action="store_true")
     parser.add_argument("--skip-existing", action=argparse.BooleanOptionalAction, default=True)
@@ -376,6 +517,7 @@ def main(argv: list[str] | None = None) -> None:
         full_resolution=args.full,
         no_gui=args.no_gui,
         limit=args.limit,
+        offset=args.offset,
         proxy_list=proxies,
         skip_warmup=args.skip_warmup,
         skip_existing=args.skip_existing,
