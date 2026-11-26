@@ -33,6 +33,7 @@ def build_default_manifest(
     pages_dir: Path = PAGES_DIR,
     manifest_path: Path = DEFAULT_GT_MANIFEST_PATH,
     target: int = 120,
+    exclude_reviewed: bool = False,
 ) -> list[dict]:
     """Generate stratified default_manifest.jsonl (up to target pages) from data/hf_dataset."""
     from collections import defaultdict
@@ -47,11 +48,21 @@ def build_default_manifest(
             if line.strip():
                 drafted_ids.add(json.loads(line)["sample_id"])
 
+    reviewed_ids: set[str] = set()
+    if exclude_reviewed and DEFAULT_GT_ANNOTATIONS_PATH.exists():
+        for line in DEFAULT_GT_ANNOTATIONS_PATH.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rec = json.loads(line)
+                if rec.get("gt_status") in {"human_verified", "flagged"}:
+                    reviewed_ids.add(rec["sample_id"])
+
     ds = DatasetDict.load_from_disk(str(hf_dir))["test"]
     all_records: list[dict] = []
     for i in range(len(ds)):
         row = ds[i]
         sid = f"{row['resource_id']}_p{row['page_num']}"
+        if sid in reviewed_ids:
+            continue
         img_path = pages_dir / row["group"] / f"{sid}.png"
         if not img_path.exists():
             raise FileNotFoundError(f"Page image missing: {img_path}")
@@ -104,15 +115,17 @@ def run_default_drafting(
     base_url: str = KKU_BASE_URL,
     model_a: str = KKU_MODEL_A,
     model_b: str = KKU_MODEL_B,
+    fallback_model: str = "qwen3.8-27b",
     only: str = "both",
     target: int = 120,
+    exclude_reviewed: bool = False,
     limit: int = 0,
     delay: float = 0.1,
     workers: int = 6,
 ) -> None:
     """Build manifest and generate dual-model KKU VLM drafts for default dataset."""
     api_key = load_kku_api_key()
-    manifest = build_default_manifest(target=target)
+    manifest = build_default_manifest(target=target, exclude_reviewed=exclude_reviewed)
     if limit > 0:
         manifest = manifest[:limit]
 
@@ -173,7 +186,15 @@ def run_default_drafting(
                 rec["model_a_kie"] = kie
                 changed = True
             except Exception as exc:
-                print(f"  [err] {model_a} failed for {sid}: {exc}", flush=True)
+                print(f"  [warn] {model_a} failed for {sid} ({exc}); trying {fallback_model}", flush=True)
+                try:
+                    md, kie = call_vlm_openai_compat(session, base_url, api_key, fallback_model, img_path)
+                    rec["model_a_name"] = fallback_model
+                    rec["model_a_markdown"] = md
+                    rec["model_a_kie"] = kie
+                    changed = True
+                except Exception as exc2:
+                    print(f"  [err] {fallback_model} failed for {sid}: {exc2}", flush=True)
 
         if only in {"both", "b"} and not rec.get("model_b_markdown"):
             try:
@@ -220,8 +241,10 @@ def main() -> None:
     parser.add_argument("--base-url", type=str, default=KKU_BASE_URL)
     parser.add_argument("--model-a", type=str, default=KKU_MODEL_A)
     parser.add_argument("--model-b", type=str, default=KKU_MODEL_B)
+    parser.add_argument("--fallback-model", type=str, default="qwen3.8-27b")
     parser.add_argument("--only", choices=["both", "a", "b"], default="both")
-    parser.add_argument("--target", type=int, default=120, help="Stratified subset size (0 = all 319).")
+    parser.add_argument("--target", type=int, default=120, help="Stratified subset size (0 = all).")
+    parser.add_argument("--exclude-reviewed", action="store_true", help="Exclude pages already verified/flagged in gt_annotations.jsonl.")
     parser.add_argument("--limit", type=int, default=0, help="Process at most N pages (0 = all).")
     parser.add_argument("--delay", type=float, default=0.1)
     parser.add_argument("--workers", type=int, default=6)
@@ -230,8 +253,10 @@ def main() -> None:
         base_url=args.base_url,
         model_a=args.model_a,
         model_b=args.model_b,
+        fallback_model=args.fallback_model,
         only=args.only,
         target=args.target,
+        exclude_reviewed=args.exclude_reviewed,
         limit=args.limit,
         delay=args.delay,
         workers=args.workers,

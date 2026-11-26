@@ -159,7 +159,13 @@ def build_combined_readme(
 
     default_hv, default_fl = 0, 0
     default_ann_path = DATA_DIR / "default_gt" / "gt_annotations.jsonl"
-    if default_ann_path.exists():
+    if HF_DATASET_DIR.exists():
+        from datasets import DatasetDict
+        _d_ds = DatasetDict.load_from_disk(str(HF_DATASET_DIR))["test"]
+        if "gt_status" in _d_ds.column_names:
+            default_hv = sum(1 for st, txt in zip(_d_ds["gt_status"], _d_ds["ground_truth_text"]) if st == "human_verified" and (txt or "").strip())
+            default_fl = sum(1 for st in _d_ds["gt_status"] if st == "flagged")
+    elif default_ann_path.exists():
         d_anns = [json.loads(l) for l in default_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
         default_hv = sum(1 for a in d_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
         default_fl = sum(1 for a in d_anns if a.get("gt_status") == "flagged")
