@@ -742,6 +742,24 @@ def build_google_dataset(
     preprocessed_dir.mkdir(parents=True, exist_ok=True)
 
     screener = ScreenerClient(base_url=screener_url) if screener_url else None
+
+    gt_dir = filtered_dir.parent / "gt"
+    gt_by_id: dict[str, dict] = {}
+    gt_by_rel: dict[str, dict] = {}
+    gt_ann_path = gt_dir / "gt_annotations.jsonl"
+    gt_man_path = gt_dir / "google_manifest.jsonl"
+    if gt_ann_path.exists():
+        for rec in read_jsonl(gt_ann_path):
+            sid = rec.get("sample_id")
+            if sid:
+                gt_by_id[sid] = rec
+    if gt_man_path.exists() and gt_by_id:
+        for rec in read_jsonl(gt_man_path):
+            sid = rec.get("sample_id") or rec.get("doc_id")
+            rel_p = rec.get("relative_path")
+            if sid and rel_p and sid in gt_by_id:
+                gt_by_rel[rel_p] = gt_by_id[sid]
+
     rows: list[dict[str, Any]] = []
     pii_rejected = 0
 
@@ -768,11 +786,16 @@ def build_google_dataset(
         pil_img.save(str(out_path), format="PNG", optimize=True)
         width, height = pil_img.size
         sha256 = hashlib.sha256(out_path.read_bytes()).hexdigest()
+        doc_id = sha256[:16]
+        gt_rec = gt_by_id.get(doc_id) or gt_by_rel.get(rel_posix)
+        gt_text = gt_rec.get("ground_truth_text", "") if gt_rec else ""
+        gt_status = gt_rec.get("gt_status", "unverified") if gt_rec else "unverified"
+        q_tags = (gt_rec.get("quality_tags") if gt_rec and gt_rec.get("quality_tags") else None) or detect_quality_tags(pil_img)
 
         rows.append(
             {
                 "image": str(out_path),
-                "doc_id": sha256[:16],
+                "doc_id": doc_id,
                 "keyword": keyword,
                 "saraban_type_hint": infer_saraban_type_from_keyword(keyword),
                 "relative_path": rel_posix,
@@ -785,9 +808,9 @@ def build_google_dataset(
                 "width": width,
                 "height": height,
                 "sha256": sha256,
-                "ground_truth_text": "",
-                "gt_status": "unverified",
-                "quality_tags": detect_quality_tags(pil_img),
+                "ground_truth_text": gt_text,
+                "gt_status": gt_status,
+                "quality_tags": q_tags,
             }
         )
 
@@ -825,6 +848,7 @@ def build_google_dataset(
         "total_documents": len(rows),
         "by_keyword": dict(Counter(r["keyword"] for r in rows)),
         "by_saraban_type_hint": dict(Counter(r["saraban_type_hint"] for r in rows)),
+        "by_gt_status": dict(Counter(r["gt_status"] for r in rows)),
         "pii_rejected": pii_rejected,
         "max_edge": max_edge,
     }
@@ -832,7 +856,7 @@ def build_google_dataset(
     stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built Google Docs HF Dataset: {stats['total_pages']} pages -> {hf_dir}")
     print(f"By keyword: {stats['by_keyword']}")
-    print(f"By saraban_type_hint: {stats['by_saraban_type_hint']} (PII rejected={pii_rejected})")
+    print(f"By saraban_type_hint: {stats['by_saraban_type_hint']} | GT: {stats['by_gt_status']} (PII rejected={pii_rejected})")
     return stats
 
 
