@@ -146,6 +146,23 @@ train_ocr/
   .venv\Scripts\python.exe eval_ocr_benchmark.py
   ```
 
+### 4. กระบวนการเก็บภาพเอกสารจาก Google Images (`google_docs`)
+1. **ดึงรูปภาพความละเอียดเต็ม** (รองรับ `--offset` เพื่อข้ามช่วงที่เคยดึงแล้วโดยไม่ทับไฟล์เดิม):
+   ```powershell
+   .venv\Scripts\train-ocr.exe collect-google --keywords-file data/google_images/keywords.txt --download-dir data/google_images/raw --profile-dir data/google_images/chrome-profile --full --no-no-gui --limit 40
+   # ดึงต่อช่วง 40-100:
+   .venv\Scripts\train-ocr.exe collect-google --keywords-file data/google_images/keywords.txt --download-dir data/google_images/raw --profile-dir data/google_images/chrome-profile --full --no-no-gui --offset 40 --limit 100
+   ```
+2. **คัดกรองคุณภาพด้วย RapidOCR + SHA256 deduplication**:
+   ```powershell
+   .venv\Scripts\train-ocr.exe filter-images --input-dir data/google_images/raw --output-dir data/google_images/filtered --min-dim 800
+   ```
+3. **Preprocess & Build HF Dataset** (แก้ EXIF orientation, แปลง RGB PNG, ตรวจ PII และคง GT เดิมจาก `data/google_images/gt/gt_annotations.jsonl`):
+   ```powershell
+   .venv\Scripts\train-ocr.exe build-google
+   .venv\Scripts\train-ocr.exe push-hf --config-name google_docs
+   ```
+
 ---
 
 ## 🧪 การทดสอบระบบ (Tests)
