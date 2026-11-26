@@ -309,7 +309,7 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
 - **Total Pages (`test` split):** {default_stats['total_pages']:,} pages from {default_stats['total_documents']:,} PDFs ({default_stats['total_organizations']:,} agencies)
 - **Resolution:** {default_stats['dpi']} DPI (RGB PNG)
 - **Stratification:** {default_stats['scanned_share_pct']}% Scanned / {default_stats['digital_share_pct']}% Complex Digital
-- **Document-Only Filtering:** Excluded {default_stats.get('graphic_rejected_pages', 0):,} non-document graphic pages (posters, infographics, colorful covers, 16:9 slides).
+- **Document-Only & PDPA Filtering:** Excluded {default_stats.get('graphic_rejected_pages', 0):,} non-document graphic pages (posters, infographics, colorful covers, 16:9 slides) and {default_stats.get('pii_rejected_pages', 0):,} PII-flagged pages.
 {default_gt_block}
 ### Page Type Breakdown
 | `page_type` | Pages |

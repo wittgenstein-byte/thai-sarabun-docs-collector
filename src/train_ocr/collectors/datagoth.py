@@ -131,7 +131,7 @@ def collect_general(
     session.headers.update({"User-Agent": "thai-govern-ocr-benchmark/1.0"})
 
     added_new = 0
-    start_offsets = (0, 120, 240, 360, 480, 600) if scanned_only else (0, 120)
+    start_offsets = tuple(range(0, 1200, 120)) if scanned_only else (0, 120)
 
     with MANIFEST_PATH.open("a", encoding="utf-8") as mf:
         for group in GROUPS:
@@ -167,6 +167,8 @@ def collect_general(
 
                 license_id = pkg.get("license_id") or ""
                 if license_id not in ALLOWED_LICENSES:
+                    continue
+                if is_pii_blocked_title(pkg.get("title") or ""):
                     continue
 
                 org_obj = pkg.get("organization") or {}

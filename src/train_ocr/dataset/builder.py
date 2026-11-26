@@ -13,7 +13,7 @@ import pypdfium2 as pdfium
 from PIL import Image as PILImage, ImageOps
 
 from train_ocr.common.manifest import read_jsonl
-from train_ocr.common.saraban_rules import detect_quality_tags
+from train_ocr.common.saraban_rules import detect_quality_tags, has_thai_citizen_id, is_pii_blocked_title
 from train_ocr.common.settings import (
     DATA_DIR,
     GOOGLE_CRAWL_DIR,
@@ -151,10 +151,11 @@ def build_general_dataset(
     PAGES_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     graphic_rejected = 0
+    pii_rejected = 0
     reason_counts: Counter = Counter()
 
     def try_screen_and_render(pm: dict) -> bool:
-        nonlocal graphic_rejected
+        nonlocal graphic_rejected, pii_rejected
         res_id = pm["resource_id"]
         if used_per_pdf[res_id] >= max_pages_per_pdf:
             return False
@@ -163,6 +164,10 @@ def build_general_dataset(
             return False
         rec = manifest_map.get(res_id)
         if not rec:
+            return False
+        if is_pii_blocked_title(f"{rec.get('title', '')} {rec.get('resource_name', '')}") or has_thai_citizen_id(pm.get("embedded_text_preview", "")):
+            seen_page_keys.add(key)
+            pii_rejected += 1
             return False
         pdf_path = Path(rec["local_path"])
         if not pdf_path.exists():
@@ -198,6 +203,10 @@ def build_general_dataset(
             graphic_rejected += 1
             for r in screen["reasons"]:
                 reason_counts[r.split("(")[0]] += 1
+            return False
+
+        if pm["page_type"] == "scanned" and screener.screen_pii(pil_img).get("has_pii"):
+            pii_rejected += 1
             return False
 
         out_dir = PAGES_DIR / rec["group"]
@@ -310,6 +319,7 @@ def build_general_dataset(
         "by_license": dict(Counter(r["license_id"] for r in rows)),
         "graphic_rejected_pages": graphic_rejected,
         "graphic_rejection_reasons": dict(reason_counts),
+        "pii_rejected_pages": pii_rejected,
         "dpi": dpi,
     }
     (DATA_DIR / "dataset_stats.json").write_text(
@@ -317,7 +327,7 @@ def build_general_dataset(
     )
     print(
         f"Built HF Dataset: {stats['total_pages']} pages from {stats['total_documents']} PDFs "
-        f"(graphic_rejected={graphic_rejected}: {dict(reason_counts)})"
+        f"(graphic_rejected={graphic_rejected}: {dict(reason_counts)}, pii_rejected={pii_rejected})"
     )
     print(
         f"page_type counts: {stats['by_page_type']} "
