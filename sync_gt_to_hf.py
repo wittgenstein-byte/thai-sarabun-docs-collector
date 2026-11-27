@@ -19,7 +19,7 @@ from config import (
     SARABAN_HF_DIR,
     load_hf_token,
 )
-from train_ocr.common.settings import DLA_BULK_DIR, DLA_BULK_HF_DIR, GOOGLE_CRAWL_DIR, GOOGLE_HF_DIR, INTERN_SODA_DIR, INTERN_SODA_KRUT_HF_DIR, RAJAKITCHA_DIR, RAJAKITCHA_HF_DIR
+from train_ocr.common.settings import DLA_BULK_DIR, DLA_BULK_HF_DIR, GOOGLE_CRAWL_DIR, GOOGLE_HF_DIR, INTERN_SODA_DIR, INTERN_SODA_KRUT_HF_DIR, LAWGOTH_DIR, LAWGOTH_HF_DIR, RAJAKITCHA_DIR, RAJAKITCHA_HF_DIR
 
 
 def export_groundtruth_backup() -> Path:
@@ -86,14 +86,18 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
         hf_dir = DLA_BULK_HF_DIR
         ann_path = DLA_BULK_DIR / "gt" / "gt_annotations.jsonl"
         config_name = "dla_bulk"
+    elif dataset_name == "lawgoth":
+        hf_dir = LAWGOTH_HF_DIR
+        ann_path = LAWGOTH_DIR / "gt" / "gt_annotations.jsonl"
+        config_name = "lawgoth"
     else:
         hf_dir = SARABAN_HF_DIR
         ann_path = GT_ANNOTATIONS_PATH
         config_name = "saraban_6types"
     is_saraban = dataset_name == "saraban"
     use_doc_id = dataset_name in {"google_docs", "rajakitcha", "intern_soda_krut"}
-    use_doc_page_id = dataset_name == "dla_bulk"
-    split_name = "train" if dataset_name in {"rajakitcha", "intern_soda_krut", "dla_bulk"} else "test"
+    use_doc_page_id = dataset_name in {"dla_bulk", "lawgoth"}
+    split_name = "train" if dataset_name in {"rajakitcha", "intern_soda_krut", "dla_bulk", "lawgoth"} else "test"
 
     if not hf_dir.exists():
         raise FileNotFoundError(f"HF dataset not found: {hf_dir}")
@@ -200,7 +204,7 @@ def sync_gt(dataset_name: str = "saraban", push: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync gt_annotations.jsonl into HF dataset.")
-    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default", "rajakitcha", "intern_soda_krut", "dla_bulk"], default="saraban")
+    parser.add_argument("--dataset", choices=["saraban", "google_docs", "default", "rajakitcha", "intern_soda_krut", "dla_bulk", "lawgoth"], default="saraban")
     parser.add_argument("--push", action="store_true", help="Also push updated dataset to Hugging Face Hub.")
     args = parser.parse_args()
     sync_gt(dataset_name=args.dataset, push=args.push)
