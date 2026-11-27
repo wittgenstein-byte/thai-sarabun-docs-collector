@@ -19,6 +19,8 @@ from train_ocr.common.settings import (
     HF_REPO_ID,
     INTERN_SODA_DIR,
     INTERN_SODA_KRUT_HF_DIR,
+    LAWGOTH_DIR,
+    LAWGOTH_HF_DIR,
     RAJAKITCHA_DIR,
     RAJAKITCHA_HF_DIR,
     SARABAN_DIR,
@@ -111,6 +113,14 @@ def merge_hub_yaml(hub_yaml: str, repo_files: list[str]) -> str:
             "config_name": "rajakitcha",
             "data_files": [{"split": "train", "path": rajakitcha_path}],
         }
+    lawgoth_path = "data/lawgoth/train-*" if any(f.startswith("data/lawgoth/") for f in repo_files) else "lawgoth/train-*"
+    if "lawgoth" not in existing_configs and any(
+        f.startswith(lawgoth_path.split("*")[0]) for f in repo_files
+    ):
+        existing_configs["lawgoth"] = {
+            "config_name": "lawgoth",
+            "data_files": [{"split": "train", "path": lawgoth_path}],
+        }
     if existing_configs:
         meta["configs"] = list(existing_configs.values())
 
@@ -126,6 +136,7 @@ def build_combined_readme(
     dla_bulk_stats: dict | None = None,
     intern_soda_krut_stats: dict | None = None,
     rajakitcha_stats: dict | None = None,
+    lawgoth_stats: dict | None = None,
 ) -> str:
     """Build a Dataset Card covering all benchmark & training configs."""
     yaml_str = merge_hub_yaml(hub_yaml, repo_files or [])
@@ -140,6 +151,7 @@ def build_combined_readme(
         "- **`dla_bulk`**: High-coverage multi-portal collection from `www.dla.go.th` & `sll.dla.go.th` (official letters, local laws, articles, legal opinions, 200 DPI, PDPA-screened).\n",
         "- **`intern_soda_krut`**: Thai government documents containing the official Garuda emblem (*ตราครุฑ*), contributed by **Intern-SODA** (`train_kruthdetect/DATA/has_krut`, 446 images, **120 `human_verified`** GT).\n",
         "- **`rajakitcha`**: Royal Gazette (*ราชกิจจานุเบกษา*) constituency announcement pages from `KittapatR/Thai-OCR-open-source-initiative` (87 images, **20 `human_verified`** GT).\n",
+        "- **`lawgoth`**: Thai statutes, Royal Decrees, and ministerial regulations from `law.go.th` (scanned & digital legal PDFs, 300 DPI, PDPA-screened).\n",
     ]
 
     # Top-level Human-Verified Ground Truth Summary
@@ -191,7 +203,14 @@ def build_combined_readme(
         dla_hv = sum(1 for a in dla_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
         dla_fl = sum(1 for a in dla_anns if a.get("gt_status") == "flagged")
 
-    total_hv = saraban_hv + google_hv + default_hv + rajakitcha_hv + krut_hv + dla_hv
+    law_hv, law_fl = 0, 0
+    law_ann_path = LAWGOTH_DIR / "gt" / "gt_annotations.jsonl"
+    if law_ann_path.exists():
+        law_anns = [json.loads(l) for l in law_ann_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        law_hv = sum(1 for a in law_anns if a.get("gt_status") == "human_verified" and (a.get("ground_truth_text") or "").strip())
+        law_fl = sum(1 for a in law_anns if a.get("gt_status") == "flagged")
+
+    total_hv = saraban_hv + google_hv + default_hv + rajakitcha_hv + krut_hv + dla_hv + law_hv
     if total_hv > 0:
         s_total = saraban_stats["total_pages"] if saraban_stats else 419
         g_total = google_stats["total_pages"] if google_stats else 108
@@ -199,6 +218,7 @@ def build_combined_readme(
         r_total = rajakitcha_stats["total_pages"] if rajakitcha_stats else 87
         k_total = intern_soda_krut_stats["total_pages"] if intern_soda_krut_stats else 446
         dla_total = dla_bulk_stats["total_pages"] if dla_bulk_stats else 1649
+        law_total = lawgoth_stats["total_pages"] if lawgoth_stats else 2000
         sections.append(
             f"""## Human-Verified Ground Truth Summary
 
@@ -212,6 +232,7 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
 | `dla_bulk` | `train` | {dla_total:,} | **{dla_hv:,}** | {dla_fl:,} | {max(0, dla_total - dla_hv - dla_fl):,} | Stratified 120-page subset drafted with KKU VLMs & **iApp OpenThai OCR 2.1** + human-verified |
 | `intern_soda_krut` | `train` | {k_total:,} | **{krut_hv:,}** | {krut_fl:,} | {max(0, k_total - krut_hv - krut_fl):,} | Garuda-stamped 120-image subset dual-drafted via KKU VLMs + human-verified (credit: Intern-SODA) |
 | `rajakitcha` | `train` | {r_total:,} | **{rajakitcha_hv:,}** | {rajakitcha_fl:,} | {max(0, r_total - rajakitcha_hv - rajakitcha_fl):,} | Royal Gazette (*ราชกิจจานุเบกษา*) drafted with **iApp OpenThai OCR 2.1** + human-verified via Review UI |
+| `lawgoth` | `train` | {law_total:,} | **{law_hv:,}** | {law_fl:,} | {max(0, law_total - law_hv - law_fl):,} | Stratified 120-page subset dual-drafted via KKU VLMs + human-verified via Review UI |
 
 > **Tip:** Filter verified Ground Truth rows directly with `ds.filter(lambda x: x["gt_status"] == "human_verified")`. Exclude `gt_status == "flagged"` (illegible/corrupted/unsuitable pages) during OCR accuracy evaluation.
 """
@@ -426,6 +447,28 @@ Total **`human_verified`** pages/images across all configs: **{total_hv:,}**
 """
         )
 
+    if lawgoth_stats:
+        pt_rows = "\n".join(
+            f"| `{pt}` | {cnt:,} ({100.0 * cnt / max(lawgoth_stats['total_pages'], 1):.1f}%) |"
+            for pt, cnt in sorted(
+                lawgoth_stats["by_page_type"].items(), key=lambda x: x[1], reverse=True
+            )
+        )
+        sections.append(
+            f"""## Config 7: `lawgoth` (Thai Statutes & Regulations from `law.go.th`)
+
+- **Total Pages (`{lawgoth_stats.get('split', 'train')}` split):** {lawgoth_stats['total_pages']:,} pages from {lawgoth_stats['total_documents']:,} PDFs
+- **Resolution:** {lawgoth_stats['dpi']} DPI (RGB PNG)
+- **Stratification:** {lawgoth_stats['scanned_share_pct']}% Scanned (`scanned` + `scanned_ocr`) / {lawgoth_stats['digital_share_pct']}% Digital
+- **PDPA & Quality Screening:** Excluded {lawgoth_stats.get('pii_excluded_pages', 0):,} PII-flagged pages and {lawgoth_stats.get('other_excluded_pages', 0):,} blank/other pages; flagged {lawgoth_stats.get('pua_mojibake_pages', 0):,} pages with legacy PUA font mojibake (`has_pua_mojibake=True`).
+
+### Breakdown by `page_type`
+| `page_type` | Pages |
+|---|---:|
+{pt_rows}
+"""
+        )
+
     sections.append(
         """## Acknowledgments & Credits
 
@@ -482,6 +525,9 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
         elif config_name == "rajakitcha":
             ds_dir = RAJAKITCHA_HF_DIR
             stats_path = RAJAKITCHA_DIR / "dataset_stats.json"
+        elif config_name == "lawgoth":
+            ds_dir = LAWGOTH_HF_DIR
+            stats_path = LAWGOTH_DIR / "dataset_stats.json"
         else:
             ds_dir = HF_DATASET_DIR
             stats_path = DATA_DIR / "dataset_stats.json"
@@ -518,6 +564,7 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
     dla_bulk_stats_path = DLA_BULK_DIR / "dataset_stats.json"
     intern_soda_krut_stats_path = INTERN_SODA_DIR / "dataset_stats_krut.json"
     rajakitcha_stats_path = RAJAKITCHA_DIR / "dataset_stats.json"
+    lawgoth_stats_path = LAWGOTH_DIR / "dataset_stats.json"
     default_stats = (
         json.loads(default_stats_path.read_text(encoding="utf-8"))
         if default_stats_path.exists()
@@ -548,6 +595,11 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
         if rajakitcha_stats_path.exists()
         else None
     )
+    lawgoth_stats = (
+        json.loads(lawgoth_stats_path.read_text(encoding="utf-8"))
+        if lawgoth_stats_path.exists()
+        else None
+    )
 
     api = HfApi(token=hf_token)
     repo_files = api.list_repo_files(HF_REPO_ID, repo_type="dataset")
@@ -563,6 +615,7 @@ def push_dataset(config_name: str = "default", readme_only: bool = False) -> Non
             dla_bulk_stats=dla_bulk_stats,
             intern_soda_krut_stats=intern_soda_krut_stats,
             rajakitcha_stats=rajakitcha_stats,
+            lawgoth_stats=lawgoth_stats,
         ),
         encoding="utf-8",
     )
@@ -581,7 +634,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Push dataset config to Hugging Face Hub.")
     parser.add_argument(
         "--config-name",
-        choices=["default", "saraban_6types", "google_docs", "dla_bulk", "intern_soda_krut", "rajakitcha"],
+        choices=["default", "saraban_6types", "google_docs", "dla_bulk", "intern_soda_krut", "rajakitcha", "lawgoth"],
         default="default",
     )
     parser.add_argument(
