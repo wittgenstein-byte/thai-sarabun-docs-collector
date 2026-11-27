@@ -31,6 +31,7 @@ def test_cli_subcommand_help(subcommand: str) -> None:
         ("collect_pdfs", "collect"),
         ("collect_dla", "collect_dla"),
         ("collect_dla_bulk", "run_bulk_harvest"),
+        ("collect_lawgoth", "run_collect_lawgoth"),
         ("collect_saraban_extra", "collect_extra"),
         ("scan_pages", "scan_all"),
         ("scan_saraban_pages", "scan_saraban_all"),
