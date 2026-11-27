@@ -131,6 +131,15 @@ DLA_BULK_MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB per file
 DLA_BULK_MAX_TOTAL_BYTES = 1024 * 1024 * 1024  # 1 GB default total budget
 DLA_BULK_DEFAULT_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".gif", ".bmp")
 
+# LawGoTh (law.go.th) Bulk PDF Collector Configuration
+LAWGOTH_DIR = DATA_DIR / "lawgoth"
+LAWGOTH_DB_PATH = LAWGOTH_DIR / "catalog.sqlite"
+LAWGOTH_FILES_DIR = LAWGOTH_DIR / "files"
+LAWGOTH_MANIFEST_PATH = LAWGOTH_DIR / "manifest.jsonl"
+LAWGOTH_PAGE_INDEX_PATH = LAWGOTH_DIR / "page_index.jsonl"
+LAWGOTH_PAGES_DIR = LAWGOTH_DIR / "pages"
+LAWGOTH_HF_DIR = LAWGOTH_DIR / "hf_dataset"
+
 # Intern-SODA Garuda (has_krut) Dataset Configuration
 INTERN_SODA_DIR = DATA_DIR / "intern_soda_data"
 INTERN_SODA_KRUT_RAW_DIR = INTERN_SODA_DIR / "has_krut"

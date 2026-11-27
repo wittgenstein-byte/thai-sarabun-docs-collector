@@ -27,6 +27,11 @@ SUBCOMMANDS: dict[str, tuple[str, str, str]] = {
         "main",
         "Bulk-harvest all public PDFs & images from dla.go.th and sll.dla.go.th",
     ),
+    "collect-lawgoth": (
+        "train_ocr.collectors.lawgoth",
+        "main",
+        "Collect all public law PDFs via pagination from law.go.th",
+    ),
     "collect-saraban-extra": (
         "train_ocr.collectors.datagoth",
         "main_saraban_extra",
@@ -76,6 +81,11 @@ SUBCOMMANDS: dict[str, tuple[str, str, str]] = {
         "train_ocr.collectors.dla_bulk.preprocess",
         "main",
         "Scan, PII-screen, render and build HF dataset from DLA bulk PDFs",
+    ),
+    "build-lawgoth": (
+        "train_ocr.collectors.lawgoth_preprocess",
+        "main",
+        "Scan, PII-screen, render and build HF dataset from law.go.th PDFs",
     ),
     "build-google": (
         "train_ocr.dataset.builder",
